@@ -314,11 +314,46 @@ setupBtn('btn-left', 'left');
 setupBtn('btn-right', 'right');
 setupBtn('btn-cage', 'cage');
 
-function isUp()    { return keys['ArrowUp']    || keys['w'] || mobileKeys.up; }
-function isDown()  { return keys['ArrowDown']  || keys['s'] || mobileKeys.down; }
-function isLeft()  { return keys['ArrowLeft']  || keys['a'] || mobileKeys.left; }
-function isRight() { return keys['ArrowRight'] || keys['d'] || mobileKeys.right; }
-function isCage()  { return keys[' '] || keys['Enter'] || mobileKeys.cage; }
+// SNES gamepad (USB controller). D-pad = move, A/B = cage, START = advance, SELECT = music.
+const GP_MAP = {
+  DPAD_UP: 12, DPAD_DOWN: 13, DPAD_LEFT: 14, DPAD_RIGHT: 15,
+  SELECT: 8, START: 9, A: 1, B: 0, X: 3, Y: 2, L: 4, R: 5
+};
+function getGamepad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const p of pads) if (p) return p;
+  return null;
+}
+function gpHeld(name) {
+  const gp = getGamepad();
+  if (!gp) return false;
+  const i = GP_MAP[name];
+  return i !== undefined && !!gp.buttons[i] && gp.buttons[i].pressed;
+}
+const _gpPrev = {};
+function gpEdge(name) {
+  const now = gpHeld(name);
+  const was = _gpPrev[name] || false;
+  _gpPrev[name] = now;
+  return now && !was;
+}
+
+function isUp()    { return keys['ArrowUp']    || keys['w'] || mobileKeys.up    || gpHeld('DPAD_UP'); }
+function isDown()  { return keys['ArrowDown']  || keys['s'] || mobileKeys.down  || gpHeld('DPAD_DOWN'); }
+function isLeft()  { return keys['ArrowLeft']  || keys['a'] || mobileKeys.left  || gpHeld('DPAD_LEFT'); }
+function isRight() { return keys['ArrowRight'] || keys['d'] || mobileKeys.right || gpHeld('DPAD_RIGHT'); }
+function isCage()  { return keys[' '] || keys['Enter'] || mobileKeys.cage || gpHeld('A') || gpHeld('B'); }
+
+function pollGamepad() {
+  // Poll every mapped button each frame so edge state stays in sync.
+  const a = gpEdge('A'), b = gpEdge('B'), x = gpEdge('X'), y = gpEdge('Y');
+  const start = gpEdge('START'), select = gpEdge('SELECT');
+  if (a || b || x || y || start || select) resumeAudio();
+  if ((a || b || x || y || start) && (gameState === 'win' || gameState === 'gameover') && stateTimer > 30) {
+    tryAdvance();
+  }
+  if (select) toggleMusic();
+}
 
 // =============================================================================
 // CONSTANTS
@@ -3690,6 +3725,7 @@ window.addEventListener('keydown', e => {
 // =============================================================================
 function update() {
   stateTimer++;
+  pollGamepad();
   updateClouds();
   updateMusic();
   updateWeather();
