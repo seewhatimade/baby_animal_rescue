@@ -1,0 +1,3772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Baby Animal Rescue!</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #1a1a2e;
+    font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  #controls {
+    position: fixed;
+    bottom: 12px;
+    left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 0 16px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .ctrl-group { display: flex; gap: 8px; pointer-events: auto; align-items: flex-end; }
+  .ctrl-pad {
+    display: grid;
+    grid-template-columns: 64px 64px 64px;
+    grid-template-rows: 64px 64px;
+    gap: 4px;
+  }
+  .ctrl-btn {
+    width: 64px; height: 64px;
+    border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.45);
+    background: rgba(255,255,255,0.18);
+    color: #fff;
+    font-size: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+  .ctrl-btn:active { background: rgba(255,255,255,0.35); }
+  .ctrl-btn.cage {
+    background: rgba(255, 200, 60, 0.5);
+    border-color: rgba(255, 230, 120, 0.85);
+    color: #5a3000;
+    font-weight: bold;
+    font-size: 14px;
+  }
+  .ctrl-btn.cage:active { background: rgba(255, 220, 100, 0.75); }
+  .ctrl-spacer { width: 64px; height: 64px; }
+  @media (min-width: 800px) { #controls { display: none; } }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="controls">
+  <div class="ctrl-group">
+    <div class="ctrl-pad">
+      <div class="ctrl-spacer"></div>
+      <div class="ctrl-btn" id="btn-up">&#x2B06;</div>
+      <div class="ctrl-spacer"></div>
+      <div class="ctrl-btn" id="btn-left">&#x2B05;</div>
+      <div class="ctrl-btn" id="btn-down">&#x2B07;</div>
+      <div class="ctrl-btn" id="btn-right">&#x27A1;</div>
+    </div>
+  </div>
+  <div class="ctrl-group">
+    <div class="ctrl-btn cage" id="btn-cage">CAGE</div>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// --- World ---
+const WORLD_W = 2400;
+const GROUND_Y_RATIO = 0.78;
+function groundY() { return H * GROUND_Y_RATIO; }
+
+// =============================================================================
+// AUDIO
+// =============================================================================
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let rotorNode = null;
+function startRotor() {
+  if (rotorNode) return;
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 70;
+  const lfo = audioCtx.createOscillator(); lfo.type = 'sine'; lfo.frequency.value = 18;
+  const lfoGain = audioCtx.createGain(); lfoGain.gain.value = 18;
+  lfo.connect(lfoGain).connect(o.frequency);
+  const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 400;
+  const g = audioCtx.createGain(); g.gain.value = 0.04;
+  o.connect(f).connect(g).connect(audioCtx.destination);
+  o.start(t); lfo.start(t);
+  rotorNode = { o, lfo, g };
+}
+function setRotorVolume(v) { if (rotorNode) rotorNode.g.gain.setTargetAtTime(v, audioCtx.currentTime, 0.1); }
+
+function playWinch() {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+  o.type = 'square'; o.frequency.value = 120;
+  g.gain.setValueAtTime(0.04, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+  o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.1);
+}
+function playPickup() {
+  const t = audioCtx.currentTime;
+  [659, 784, 988].forEach((f, i) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i * 0.06);
+    g.gain.linearRampToValueAtTime(0.10, t + i * 0.06 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.06 + 0.25);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t + i * 0.06); o.stop(t + i * 0.06 + 0.27);
+  });
+}
+function playHeal() {
+  const t = audioCtx.currentTime;
+  [523, 659, 784, 1047, 1319].forEach((f, i) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i * 0.08);
+    g.gain.linearRampToValueAtTime(0.09, t + i * 0.08 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.08 + 0.35);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t + i * 0.08); o.stop(t + i * 0.08 + 0.4);
+  });
+}
+function playSparkle() {
+  const t = audioCtx.currentTime;
+  [1568, 1976, 2349].forEach((f, i) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i * 0.05);
+    g.gain.linearRampToValueAtTime(0.06, t + i * 0.05 + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.05 + 0.2);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t + i * 0.05); o.stop(t + i * 0.05 + 0.22);
+  });
+}
+function playReunion() {
+  const t = audioCtx.currentTime;
+  [523, 659, 784, 988, 784, 988, 1175, 1319].forEach((f, i) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i * 0.10);
+    g.gain.linearRampToValueAtTime(0.10, t + i * 0.10 + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.10 + 0.4);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t + i * 0.10); o.stop(t + i * 0.10 + 0.45);
+  });
+}
+function playWin() {
+  const t = audioCtx.currentTime;
+  [523, 659, 784, 1047, 1319, 1568].forEach((f, i) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i * 0.13);
+    g.gain.linearRampToValueAtTime(0.13, t + i * 0.13 + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.13 + 0.55);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t + i * 0.13); o.stop(t + i * 0.13 + 0.6);
+  });
+}
+function playFootstep() {
+  const t = audioCtx.currentTime;
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.18, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length) * 0.7;
+  const src = audioCtx.createBufferSource(); src.buffer = buf;
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(0.10, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 160;
+  src.connect(f); f.connect(g); g.connect(audioCtx.destination); src.start(t);
+}
+function playRoar() {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(180, t);
+  o.frequency.exponentialRampToValueAtTime(60, t + 0.6);
+  const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 600;
+  g.gain.setValueAtTime(0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.7);
+  o.connect(f); f.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.75);
+}
+function playCrunch() {
+  const t = audioCtx.currentTime;
+  for (let k = 0; k < 3; k++) {
+    const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.12, audioCtx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+    const src = audioCtx.createBufferSource(); src.buffer = buf;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.12, t + k * 0.1); g.gain.exponentialRampToValueAtTime(0.0001, t + k * 0.1 + 0.12);
+    const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 800;
+    src.connect(f); f.connect(g); g.connect(audioCtx.destination); src.start(t + k * 0.1);
+  }
+}
+function playSadSound() {
+  const t = audioCtx.currentTime;
+  [440, 370, 311, 247].forEach((f, i) => {
+    const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    g.gain.setValueAtTime(0, t + i * 0.18);
+    g.gain.linearRampToValueAtTime(0.13, t + i * 0.18 + 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + i * 0.18 + 0.45);
+    o.connect(g); g.connect(audioCtx.destination); o.start(t + i * 0.18); o.stop(t + i * 0.18 + 0.5);
+  });
+}
+
+// --- Procedural music: gentle major-key loop ---
+const NOTE_FREQ = {
+  C3: 130.81, D3: 146.83, E3: 164.81, F3: 174.61, G3: 196,    A3: 220,    B3: 246.94,
+  C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23, G4: 392,    A4: 440,    B4: 493.88,
+  C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46, G5: 783.99, A5: 880,
+};
+const MUSIC_LOOP = [
+  ['C3', 'E5', true ], [null, 'G5', false], ['G3', 'C5', false], [null, 'E5', false],
+  ['F3', 'A4', true ], [null, 'C5', false], ['C4', 'F5', false], [null, 'A4', false],
+  ['G3', 'B4', true ], [null, 'D5', false], ['D4', 'G5', false], [null, 'B4', false],
+  ['C3', 'C5', true ], [null, 'E5', false], ['E3', 'G5', false], [null, 'C5', false],
+];
+let musicState = { on: true, noteIdx: 0, nextNoteTime: 0, bpm: 96 };
+function playMusicTone(t, freq, dur, type, vol) {
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+function playMusicKick(t) {
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(120, t);
+  o.frequency.exponentialRampToValueAtTime(40, t + 0.1);
+  g.gain.setValueAtTime(0.05, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(t); o.stop(t + 0.14);
+}
+function updateMusic() {
+  if (!musicState.on) { musicState.nextNoteTime = 0; return; }
+  if (audioCtx.state !== 'running') return;
+  const now = audioCtx.currentTime;
+  const eighthDur = 60 / musicState.bpm / 2;
+  if (musicState.nextNoteTime < now) musicState.nextNoteTime = now + 0.05;
+  while (musicState.nextNoteTime < now + 0.2) {
+    const t = musicState.nextNoteTime;
+    const [bass, melody, kick] = MUSIC_LOOP[musicState.noteIdx % MUSIC_LOOP.length];
+    if (bass)   playMusicTone(t, NOTE_FREQ[bass],   eighthDur * 1.7,  'triangle', 0.04);
+    if (melody) playMusicTone(t, NOTE_FREQ[melody], eighthDur * 0.85, 'sine',     0.026);
+    if (kick)   playMusicKick(t);
+    musicState.noteIdx++;
+    musicState.nextNoteTime += eighthDur;
+  }
+}
+function toggleMusic() {
+  musicState.on = !musicState.on;
+  if (!musicState.on) musicState.nextNoteTime = 0;
+}
+
+// =============================================================================
+// INPUT
+// =============================================================================
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+  if ((e.key === 'm' || e.key === 'M') && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+    toggleMusic();
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+function resumeAudio() {
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  startRotor();
+}
+canvas.addEventListener('mousedown', resumeAudio);
+canvas.addEventListener('touchstart', resumeAudio, { passive: true });
+window.addEventListener('keydown', resumeAudio);
+
+const mobileKeys = { up:false, down:false, left:false, right:false, cage:false };
+function setupBtn(id, key) {
+  const el = document.getElementById(id);
+  el.addEventListener('touchstart', e => { e.preventDefault(); mobileKeys[key] = true; resumeAudio(); }, { passive: false });
+  el.addEventListener('touchend', e => { e.preventDefault(); mobileKeys[key] = false; });
+  el.addEventListener('touchcancel', e => { mobileKeys[key] = false; });
+  el.addEventListener('mousedown', () => { mobileKeys[key] = true; resumeAudio(); });
+  el.addEventListener('mouseup', () => { mobileKeys[key] = false; });
+  el.addEventListener('mouseleave', () => { mobileKeys[key] = false; });
+}
+setupBtn('btn-up', 'up');
+setupBtn('btn-down', 'down');
+setupBtn('btn-left', 'left');
+setupBtn('btn-right', 'right');
+setupBtn('btn-cage', 'cage');
+
+function isUp()    { return keys['ArrowUp']    || keys['w'] || mobileKeys.up; }
+function isDown()  { return keys['ArrowDown']  || keys['s'] || mobileKeys.down; }
+function isLeft()  { return keys['ArrowLeft']  || keys['a'] || mobileKeys.left; }
+function isRight() { return keys['ArrowRight'] || keys['d'] || mobileKeys.right; }
+function isCage()  { return keys[' '] || keys['Enter'] || mobileKeys.cage; }
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+const HELI_W = 70, HELI_H = 24;
+const HELI_SPEED = 4.0;
+const CABLE_MAX = 360;
+const CABLE_SPEED = 3.5;
+const CAGE_W = 36, CAGE_H = 32;
+const PICKUP_RADIUS = 70;
+const ANIMAL_WALK_SPEED = 1.0;
+
+// Vet clinic safety zone (centered in world; set in startLevel)
+let VET = { x: 0, w: 400 };
+
+// =============================================================================
+// THEMES — sky / ground / weather / obstacle palette per playthrough
+// =============================================================================
+const THEMES = [
+  {
+    id: 'sunny',
+    name: 'Sunny Meadow',
+    sky: ['#9ad6ff', '#c8e8ff', '#fff5d9', '#ffe0b3'],
+    ground: ['#a4d27a', '#5e8a3e'],
+    grass: '#c4e890',
+    flowerColors: ['#ffd0e0', '#ffeb88', '#c0a8ff', '#ffaaaa'],
+    hillColor: '#8fb09a',
+    treeColor: '#5a8060',
+    weather: null,
+    obstacleMix: ['tree', 'tree', 'fence', 'car', 'tree', 'fence'],
+  },
+  {
+    id: 'forest',
+    name: 'Deep Forest',
+    sky: ['#7a9eaa', '#a0c0c0', '#c8d8d0', '#dde0c8'],
+    ground: ['#7ab863', '#3a5a2a'],
+    grass: '#8cc868',
+    flowerColors: ['#ff6688', '#ffaa44', '#bb88ff'],
+    hillColor: '#6a8a5a',
+    treeColor: '#3a6040',
+    weather: 'leaves',
+    obstacleMix: ['tree', 'pine', 'tree', 'pine', 'tree', 'pine', 'tree'],
+  },
+  {
+    id: 'mountain',
+    name: 'Mountain Valley',
+    sky: ['#a0c8e8', '#c0d8e8', '#e8e0d0', '#d8c8a8'],
+    ground: ['#9caa78', '#5a6438'],
+    grass: '#a0c068',
+    flowerColors: ['#ffaa88', '#ffeb88'],
+    hillColor: '#7a8060',
+    treeColor: '#3a5040',
+    weather: null,
+    obstacleMix: ['boulder', 'pine', 'pine', 'boulder', 'fence', 'pine'],
+    bigMountains: true,
+  },
+  {
+    id: 'storm',
+    name: 'Stormy Day',
+    sky: ['#3a4858', '#5a6878', '#7a8898', '#aab8c8'],
+    ground: ['#4a7a3a', '#2a4022'],
+    grass: '#5a8a4a',
+    flowerColors: ['#aa6688', '#ffaa44'],
+    hillColor: '#4a6850',
+    treeColor: '#2a4030',
+    weather: 'rain',
+    obstacleMix: ['tree', 'tree', 'fence', 'car', 'tree', 'fence'],
+  },
+  {
+    id: 'snow',
+    name: 'Snowy Day',
+    sky: ['#bccfdc', '#d4dde6', '#eaecee', '#fafafa'],
+    ground: ['#fafafa', '#bcccd4'],
+    grass: '#dceae8',
+    flowerColors: [],
+    hillColor: '#c8d4d8',
+    treeColor: '#3a5040',
+    weather: 'snow',
+    obstacleMix: ['pine', 'pine', 'snowman', 'pine', 'fence', 'pine', 'snowman'],
+  },
+];
+
+// =============================================================================
+// SPECIES — 8 baby/mommy pairs
+// =============================================================================
+const SPECIES = [
+  { id: 'puppy',    babyName: 'Puppy',    momName: 'Mama Dog' },
+  { id: 'kitten',   babyName: 'Kitten',   momName: 'Mama Cat' },
+  { id: 'bunny',    babyName: 'Bunny',    momName: 'Mama Bunny' },
+  { id: 'fawn',     babyName: 'Fawn',     momName: 'Mama Deer' },
+  { id: 'duckling', babyName: 'Duckling', momName: 'Mama Duck' },
+  { id: 'cub',      babyName: 'Bear Cub', momName: 'Mama Bear' },
+  { id: 'kit',      babyName: 'Fox Kit',  momName: 'Mama Fox' },
+  { id: 'lamb',     babyName: 'Lamb',     momName: 'Mama Sheep' },
+];
+
+// =============================================================================
+// GAME STATE
+// =============================================================================
+let heli, cage, camera;
+let babies = [];
+let mommies = [];
+let particles = [];
+let floats = [];
+let obstacles = [];
+let weatherParticles = [];
+let dino = null;
+let clinicHealth = 1.0;        // 1=intact, drops while smashing, 0=destroyed
+let eatenCount = 0;            // babies lost to dino this game
+let rescuedCount = 0;
+let reunionTriggered = false;
+let gameState = 'playing';     // playing | win | gameover
+let stateTimer = 0;
+let levelTimer = 0;
+let idCounter = 0;
+let currentThemeIdx = 0;
+let currentTheme = THEMES[0];
+let lightningFlash = 0;
+let screenShake = 0;
+
+// =============================================================================
+// UTILITY
+// =============================================================================
+function rectOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function spawnParticle(o) {
+  particles.push(Object.assign({
+    x:0, y:0, vx:0, vy:0, gravity:0,
+    life:1, decay:0.02, size:3, color:'#fff', shape:'circle',
+  }, o));
+}
+function updateParticles() {
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += p.gravity;
+    p.life -= p.decay;
+  }
+  particles = particles.filter(p => p.life > 0);
+}
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    if (p.shape === 'circle') {
+      ctx.beginPath(); ctx.arc(p.x - camera.x, p.y, p.size * Math.max(0.2, p.life), 0, Math.PI * 2); ctx.fill();
+    } else if (p.shape === 'star') {
+      drawStar(p.x - camera.x, p.y, p.size);
+    } else if (p.shape === 'heart') {
+      drawHeart(p.x - camera.x, p.y, p.size);
+    }
+    ctx.restore();
+  }
+}
+function drawStar(x, y, r) {
+  ctx.beginPath();
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+    const rr = (i % 2 === 0) ? r : r * 0.45;
+    const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath(); ctx.fill();
+}
+function drawHeart(x, y, r) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + r * 0.4);
+  ctx.bezierCurveTo(x, y - r * 0.2, x - r * 1.2, y - r * 0.2, x - r * 0.6, y + r * 0.6);
+  ctx.lineTo(x, y + r * 1.2);
+  ctx.lineTo(x + r * 0.6, y + r * 0.6);
+  ctx.bezierCurveTo(x + r * 1.2, y - r * 0.2, x, y - r * 0.2, x, y + r * 0.4);
+  ctx.fill();
+}
+
+class FloatText {
+  constructor(x, y, text, color) {
+    this.x = x; this.y = y; this.text = text; this.color = color;
+    this.life = 1; this.vy = -1.2;
+  }
+  update() { this.y += this.vy; this.vy *= 0.97; this.life -= 0.018; }
+  draw() {
+    ctx.save();
+    ctx.globalAlpha = this.life;
+    ctx.font = "bold 22px 'Comic Sans MS', cursive";
+    ctx.textAlign = 'center';
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 4;
+    ctx.fillText(this.text, this.x - camera.x, this.y);
+    ctx.restore();
+  }
+}
+
+// =============================================================================
+// LEVEL SETUP
+// =============================================================================
+function startLevel() {
+  // Pick this run's theme — cycles through THEMES on each replay
+  currentTheme = THEMES[currentThemeIdx % THEMES.length];
+
+  // Place vet centered in the world
+  VET.x = Math.round((WORLD_W - VET.w) / 2);
+
+  // Spawn one baby of each species — 4 on each side of the vet
+  babies = [];
+  const positions = [200, 410, 620, 850, 1550, 1780, 2000, 2200];
+  const shuffled = SPECIES.slice().sort(() => Math.random() - 0.5);
+  for (let i = 0; i < shuffled.length; i++) {
+    babies.push(makeBaby(shuffled[i], positions[i]));
+  }
+
+  // Generate obstacles (avoid baby positions and vet zone)
+  obstacles = generateObstacles(currentTheme, positions);
+
+  // Helicopter starts on the helipad (center-right of vet zone)
+  heli = {
+    x: helipadX(),
+    y: H * 0.32,
+    vx: 0, vy: 0, dir: 1,
+    rotorPhase: 0, tailRotorPhase: 0, bobPhase: 0,
+  };
+  cage = {
+    cableLength: 0, angle: 0, angVel: 0,
+    x: heli.x, y: heli.y, passenger: null,
+  };
+  mommies = [];
+  particles = [];
+  floats = [];
+  weatherParticles = [];
+  rescuedCount = 0;
+  eatenCount = 0;
+  reunionTriggered = false;
+  gameState = 'playing';
+  stateTimer = 0;
+  levelTimer = 0;
+  lightningFlash = 0;
+  screenShake = 0;
+  clinicHealth = 1.0;
+  // Dino spawns from a random side, after a short head-start for the player
+  dino = makeDino(Math.random() < 0.5);
+  cameraFollow(true);
+}
+
+function makeBaby(species, x) {
+  return {
+    id: ++idCounter,
+    species,
+    x, y: groundY() - babyHeight(species.id),
+    homeX: x,
+    state: 'injured',  // injured | boarding | in_cage | healing | healed | reuniting | leaving | gone
+    healTimer: 0,
+    targetX: x,
+    walkPhase: Math.random() * Math.PI * 2,
+    dir: Math.random() < 0.5 ? -1 : 1,
+    bobPhase: Math.random() * Math.PI * 2,
+    sparklePhase: 0,
+    healedSlot: -1,
+    mommy: null,
+  };
+}
+
+function makeMommy(speciesId, fromLeft, baby) {
+  // Mommies enter from just outside the vet area on alternating sides —
+  // brisk reunion, both edges of the camera view show new mommies arriving.
+  const startX = fromLeft ? VET.x - 200 : VET.x + VET.w + 200;
+  return {
+    speciesId,
+    x: startX, y: groundY() - momHeight(speciesId),
+    state: 'walking_to_baby',
+    walkPhase: 0,
+    dir: fromLeft ? 1 : -1,
+    fromLeft,
+    nuzzleTimer: 0,
+    babyRef: baby,
+    bobPhase: 0,
+    leavingFrames: 0,
+  };
+}
+
+function cameraFollow(snap) {
+  if (!camera) camera = { x: 0 };
+  const target = Math.max(0, Math.min(WORLD_W - W, heli.x - W / 2));
+  if (snap) camera.x = target;
+  else camera.x += (target - camera.x) * 0.08;
+}
+
+// =============================================================================
+// CLOUDS / BACKGROUND
+// =============================================================================
+let cloudData = null;
+function initClouds() {
+  cloudData = [];
+  const N = 26;
+  for (let i = 0; i < N; i++) {
+    cloudData.push({
+      x: Math.random() * (WORLD_W + 600) - 300,
+      y: 30 + Math.random() * 200,
+      r: 16 + Math.random() * 22,
+      vx: -(0.05 + Math.random() * 0.22),
+    });
+  }
+}
+function updateClouds() {
+  if (!cloudData) initClouds();
+  for (const c of cloudData) {
+    c.x += c.vx;
+    if (c.x < -300) c.x = WORLD_W + 300;
+  }
+}
+function drawCloud(x, y, r) {
+  ctx.beginPath();
+  ctx.arc(x - r * 0.7, y, r * 0.65, 0, Math.PI * 2);
+  ctx.arc(x, y - r * 0.3, r, 0, Math.PI * 2);
+  ctx.arc(x + r * 0.8, y, r * 0.7, 0, Math.PI * 2);
+  ctx.arc(x + r * 0.2, y + r * 0.3, r * 0.65, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawBackground() {
+  const t = currentTheme;
+  // Sky gradient
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0,    t.sky[0]);
+  g.addColorStop(0.5,  t.sky[1]);
+  g.addColorStop(0.85, t.sky[2]);
+  g.addColorStop(1,    t.sky[3]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // Lightning flash overlay (storm theme)
+  if (lightningFlash > 0) {
+    ctx.fillStyle = `rgba(255,255,240,${(lightningFlash / 8) * 0.45})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Distant mountains (only on mountain theme — bigger, snow-capped)
+  if (t.bigMountains) {
+    ctx.save(); ctx.translate(-camera.x * 0.2, 0);
+    for (let i = 0; i < 12; i++) {
+      const mx = i * 240 + 60;
+      const peakY = groundY() - 220 - (i % 3) * 40;
+      ctx.fillStyle = i % 2 === 0 ? '#8a90a8' : '#7a8090';
+      ctx.beginPath();
+      ctx.moveTo(mx - 160, groundY());
+      ctx.lineTo(mx, peakY);
+      ctx.lineTo(mx + 160, groundY());
+      ctx.closePath(); ctx.fill();
+      // Snow cap
+      ctx.fillStyle = '#fafafa';
+      ctx.beginPath();
+      ctx.moveTo(mx - 30, peakY + 35);
+      ctx.lineTo(mx, peakY);
+      ctx.lineTo(mx + 30, peakY + 35);
+      ctx.lineTo(mx + 18, peakY + 38);
+      ctx.lineTo(mx + 8, peakY + 32);
+      ctx.lineTo(mx - 4, peakY + 38);
+      ctx.lineTo(mx - 18, peakY + 32);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Rolling hills (parallax)
+  ctx.save(); ctx.translate(-camera.x * 0.3, 0);
+  ctx.fillStyle = t.hillColor;
+  for (let i = 0; i < 16; i++) {
+    const mx = i * 200 + 40;
+    const my = groundY() - 80 - (i % 3) * 22;
+    ctx.beginPath();
+    ctx.ellipse(mx, groundY(), 140, my < groundY() ? groundY() - my : 40, 0, Math.PI, Math.PI * 2);
+    ctx.fill();
+  }
+  // Distant trees on hills
+  ctx.fillStyle = t.treeColor;
+  for (let i = 0; i < 10; i++) {
+    const tx = 120 + i * 260;
+    const ty = groundY() - 50;
+    ctx.beginPath();
+    ctx.moveTo(tx - 18, ty + 10);
+    ctx.lineTo(tx, ty - 30);
+    ctx.lineTo(tx + 18, ty + 10);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+
+  // Clouds (parallax) — darker on storm
+  if (!cloudData) initClouds();
+  if (t.id === 'storm') ctx.fillStyle = 'rgba(70,80,90,0.85)';
+  else if (t.id === 'snow') ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  else ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (const c of cloudData) {
+    const sx = c.x - camera.x * 0.4;
+    if (sx > -100 && sx < W + 100) drawCloud(sx, c.y, c.r);
+  }
+
+  // Ground
+  const gy = groundY();
+  const gg = ctx.createLinearGradient(0, gy, 0, H);
+  gg.addColorStop(0, t.ground[0]); gg.addColorStop(1, t.ground[1]);
+  ctx.fillStyle = gg; ctx.fillRect(0, gy, W, H - gy);
+
+  // Grass tufts
+  ctx.fillStyle = t.grass;
+  for (let wx = 0; wx < WORLD_W; wx += 14) {
+    const sx = wx - camera.x;
+    if (sx < -10 || sx > W + 10) continue;
+    ctx.fillRect(sx, gy - 2, 2, 3);
+    ctx.fillRect(sx + 5, gy - 4, 2, 5);
+  }
+
+  // Snow piles dot the ground in winter
+  if (t.id === 'snow') {
+    ctx.fillStyle = '#fff';
+    for (let i = 0; i < 40; i++) {
+      const wx = (i * 73.5) % WORLD_W;
+      const sx = wx - camera.x;
+      if (sx < -20 || sx > W + 20) continue;
+      const ph = 4 + (i * 5) % 6;
+      ctx.beginPath();
+      ctx.ellipse(sx, gy + 2, 14, ph, 0, Math.PI, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Scattered flowers (skipped in snow/storm)
+  if (t.flowerColors.length > 0) {
+    ctx.save();
+    for (let i = 0; i < 60; i++) {
+      const wx = (i * 137.5) % WORLD_W;
+      const sx = wx - camera.x;
+      if (sx < -10 || sx > W + 10) continue;
+      ctx.fillStyle = t.flowerColors[i % t.flowerColors.length];
+      const fy = gy + 4 + (i * 7) % 14;
+      ctx.beginPath();
+      ctx.arc(sx, fy - 3, 2, 0, Math.PI * 2);
+      ctx.arc(sx - 2, fy - 1, 2, 0, Math.PI * 2);
+      ctx.arc(sx + 2, fy - 1, 2, 0, Math.PI * 2);
+      ctx.arc(sx, fy + 1, 2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffeb88';
+      ctx.beginPath(); ctx.arc(sx, fy - 1, 1, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// =============================================================================
+// VET CLINIC
+// =============================================================================
+function vetRect() {
+  return { x: VET.x + 20, y: groundY() - 130, w: 160, h: 130 };
+}
+function vetCenterX() { return VET.x + VET.w / 2; }
+function helipadX() { return VET.x + VET.w - 60; }
+function doorX() { const r = vetRect(); return r.x + r.w / 2; }
+
+// Position of window slot 0..7 inside the clinic (centers, world coords).
+// 4-column × 2-row grid on the front facade.
+function windowCenter(slot) {
+  const r = vetRect();
+  const col = slot % 4;
+  const row = Math.floor(slot / 4);
+  return {
+    x: r.x + 24 + col * 32,
+    y: r.y + 30 + row * 30,
+  };
+}
+const WINDOW_RX = 12, WINDOW_RY = 10;
+
+function drawVet() {
+  const r = vetRect();
+  const hx = r.x - camera.x, hy = r.y;
+
+  // Helipad (always drawn, even after smash)
+  const padX = helipadX() - camera.x, padY = groundY() - 1;
+  ctx.fillStyle = 'rgba(50,50,60,0.85)';
+  ctx.beginPath();
+  ctx.ellipse(padX, padY + 4, 45, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff5a8';
+  ctx.font = "bold 28px 'Comic Sans MS', cursive";
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('H', padX, padY - 2);
+  ctx.textBaseline = 'alphabetic';
+
+  // If destroyed, draw rubble pile and bail out before rebuilding the clinic
+  if (clinicHealth <= 0) {
+    drawClinicRubble(hx, hy, r);
+    return;
+  }
+
+  // Tilt the building progressively as it takes damage
+  const damage = 1 - clinicHealth;
+  ctx.save();
+  if (damage > 0) {
+    ctx.translate(hx + r.w / 2, hy + r.h);
+    ctx.rotate(damage * 0.18);                 // ~10° lean at full damage
+    ctx.translate(-(hx + r.w / 2), -(hy + r.h));
+  }
+
+  // Main body
+  ctx.fillStyle = '#fafafa';
+  ctx.fillRect(hx, hy, r.w, r.h);
+  // Side shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  ctx.fillRect(hx + r.w - 8, hy, 8, r.h);
+  // Roof
+  ctx.fillStyle = '#7ec0a4';
+  ctx.beginPath();
+  ctx.moveTo(hx - 6, hy);
+  ctx.lineTo(hx + r.w / 2, hy - 28);
+  ctx.lineTo(hx + r.w + 6, hy);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#4a7a60'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(hx - 6, hy); ctx.lineTo(hx + r.w / 2, hy - 28); ctx.lineTo(hx + r.w + 6, hy);
+  ctx.stroke();
+  // Sign on top of roof: paw print
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(hx + r.w / 2 - 18, hy - 22, 36, 22);
+  ctx.fillStyle = '#5a8a6a';
+  // Paw pad
+  const px = hx + r.w / 2, py = hy - 8;
+  ctx.beginPath(); ctx.ellipse(px, py, 5, 4, 0, 0, Math.PI * 2); ctx.fill();
+  // Toe beans
+  ctx.beginPath(); ctx.arc(px - 6, py - 6, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px - 2, py - 9, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px + 2, py - 9, 2.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px + 6, py - 6, 2.4, 0, Math.PI * 2); ctx.fill();
+
+  // 8 round windows (4 cols × 2 rows) — one per rescued baby
+  for (let slot = 0; slot < 8; slot++) {
+    const w = windowCenter(slot);
+    const wx = w.x - camera.x, wy = w.y;
+    // Glass
+    ctx.fillStyle = '#bfe2ff';
+    ctx.beginPath();
+    ctx.ellipse(wx, wy, WINDOW_RX, WINDOW_RY, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // Sill shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.08)';
+    ctx.fillRect(wx - WINDOW_RX, wy + WINDOW_RY - 2, WINDOW_RX * 2, 2);
+    // Baby peeking out (if a baby has been rescued into this slot)
+    const baby = babies.find(b => b.healedSlot === slot && b.state === 'in_window');
+    if (baby) drawBabyInWindow(baby, wx, wy);
+    // Frame
+    ctx.strokeStyle = '#6a8a6a'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(wx, wy, WINDOW_RX, WINDOW_RY, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Door (drawn open if a baby is being collected)
+  const doorOpen = mommies.some(m => m.state === 'waiting_for_baby' || m.state === 'nuzzling') ||
+                   babies.some(b => b.state === 'reuniting');
+  ctx.fillStyle = doorOpen ? '#3a2410' : '#a4724a';
+  ctx.fillRect(hx + r.w / 2 - 14, hy + r.h - 36, 28, 36);
+  if (!doorOpen) {
+    ctx.fillStyle = '#7a4a2a';
+    ctx.fillRect(hx + r.w / 2 - 14, hy + r.h - 36, 28, 3);
+    // Doorknob
+    ctx.fillStyle = '#ffd44a';
+    ctx.beginPath(); ctx.arc(hx + r.w / 2 + 8, hy + r.h - 18, 1.6, 0, Math.PI * 2); ctx.fill();
+  } else {
+    // Open doorway — light from inside
+    ctx.fillStyle = 'rgba(255,240,180,0.6)';
+    ctx.fillRect(hx + r.w / 2 - 12, hy + r.h - 34, 24, 32);
+  }
+
+  // Cracks while damaged (deterministic positions so they don't flicker)
+  if (damage > 0) {
+    ctx.strokeStyle = 'rgba(40,40,40,0.7)'; ctx.lineWidth = 1.5;
+    const numCracks = Math.floor(damage * 8);
+    for (let i = 0; i < numCracks; i++) {
+      const seed = i * 71 + 13;
+      const x1 = hx + 6 + (seed * 17) % (r.w - 12);
+      const y1 = hy + 12 + (seed * 11) % (r.h - 24);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      let cx = x1, cy = y1;
+      for (let j = 1; j <= 4; j++) {
+        cx += (((seed + j) * 7) % 9) - 4;
+        cy += 4 + ((seed * j) % 6);
+        ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore(); // end tilt transform
+
+  // VET ZONE label (always upright, regardless of building tilt)
+  ctx.save();
+  ctx.font = "bold 14px 'Comic Sans MS', cursive";
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#3a6a4a';
+  ctx.shadowColor = 'rgba(255,255,255,0.7)'; ctx.shadowBlur = 4;
+  ctx.fillText('🩹 VET CLINIC 🩹', VET.x + VET.w / 2 - camera.x, groundY() - 130);
+  ctx.restore();
+
+  // Flowerbed in front of vet
+  for (let i = 0; i < 6; i++) {
+    const fx = hx + 8 + i * 16;
+    const fy = hy + r.h + 4;
+    ctx.fillStyle = ['#ff7799', '#ffd44a', '#bb88ff'][i % 3];
+    ctx.beginPath(); ctx.arc(fx, fy, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#5a8a3a';
+    ctx.fillRect(fx - 1, fy + 2, 2, 5);
+  }
+}
+
+function drawClinicRubble(hx, hy, r) {
+  // Pile of debris on the ground where the clinic used to be
+  const baseY = hy + r.h;
+  // Broken wall fragments
+  ctx.fillStyle = '#cfcfcf';
+  ctx.beginPath();
+  ctx.moveTo(hx, baseY);
+  ctx.lineTo(hx, baseY - 30);
+  ctx.lineTo(hx + 20, baseY - 18);
+  ctx.lineTo(hx + 38, baseY - 36);
+  ctx.lineTo(hx + 60, baseY - 22);
+  ctx.lineTo(hx + 80, baseY - 38);
+  ctx.lineTo(hx + 100, baseY - 20);
+  ctx.lineTo(hx + 120, baseY - 30);
+  ctx.lineTo(hx + 120, baseY);
+  ctx.closePath(); ctx.fill();
+  // Roof shards lying about
+  ctx.save();
+  ctx.fillStyle = '#7ec0a4';
+  ctx.translate(hx + 30, baseY - 18);
+  ctx.rotate(-0.4);
+  ctx.fillRect(-22, -6, 44, 8);
+  ctx.restore();
+  ctx.save();
+  ctx.fillStyle = '#7ec0a4';
+  ctx.translate(hx + 90, baseY - 14);
+  ctx.rotate(0.5);
+  ctx.fillRect(-18, -5, 36, 7);
+  ctx.restore();
+  // Door fragment
+  ctx.fillStyle = '#a4724a';
+  ctx.save();
+  ctx.translate(hx + 70, baseY - 8);
+  ctx.rotate(0.3);
+  ctx.fillRect(-10, -14, 18, 14);
+  ctx.restore();
+  // Dust/debris specks
+  ctx.fillStyle = '#8a8a8a';
+  for (let i = 0; i < 14; i++) {
+    const sx = hx + ((i * 17) % r.w);
+    const sy = baseY - 1 - (i % 3) * 2;
+    ctx.fillRect(sx, sy, 3, 3);
+  }
+  // Sad cross sign on the rubble
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(hx + r.w / 2 - 14, baseY - 70, 28, 28);
+  ctx.fillStyle = '#d83030';
+  ctx.fillRect(hx + r.w / 2 - 4, baseY - 70, 8, 28);
+  ctx.fillRect(hx + r.w / 2 - 14, baseY - 60, 28, 8);
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.font = "bold 14px 'Comic Sans MS', cursive";
+  ctx.textAlign = 'center';
+  ctx.fillText('💔', hx + r.w / 2, baseY - 80);
+  ctx.restore();
+}
+
+// Draw a small baby (head + a bit of body) clipped to a round window so it
+// looks like the baby is peeking out from inside the clinic.
+function drawBabyInWindow(b, wx, wy) {
+  ctx.save();
+  // Clip to the window oval (slightly inset so the frame still shows around)
+  ctx.beginPath();
+  ctx.ellipse(wx, wy, WINDOW_RX - 0.5, WINDOW_RY - 0.5, 0, 0, Math.PI * 2);
+  ctx.clip();
+  // Position so head sits in the upper portion of the window, legs are clipped
+  const bob = Math.sin(b.bobPhase) * 0.6;
+  ctx.translate(wx, wy + 6 + bob);
+  ctx.scale(0.55, 0.55);
+  drawAnimalAt(b.species.id, false, 0, 0, {
+    dir: 1, walking: false, walkPhase: 0, bobPhase: b.bobPhase,
+  });
+  ctx.restore();
+}
+
+// =============================================================================
+// ANIMAL DRAWING — each species has a baby + mommy variant
+// =============================================================================
+// Distance from sprite origin (translate point) DOWN to the feet — used to
+// position the origin so feet sit on the ground.
+function babyHeight(speciesId) {
+  switch (speciesId) {
+    case 'duckling': return 11;
+    case 'fawn':     return 18;
+    case 'lamb':     return 15;
+    case 'cub':      return 15;
+    case 'kit':      return 13;
+    case 'puppy':    return 13;
+    case 'kitten':   return 13;
+    case 'bunny':    return 12;
+    default:         return 13;
+  }
+}
+function momHeight(speciesId) {
+  switch (speciesId) {
+    case 'duckling': return 17;
+    case 'fawn':     return 30;
+    case 'lamb':     return 22;
+    case 'cub':      return 23;
+    case 'kit':      return 24;
+    case 'puppy':    return 21;
+    case 'kitten':   return 21;
+    case 'bunny':    return 20;
+    default:         return 21;
+  }
+}
+
+// Generic helper: draw an oval (used for body/heads)
+function fillEllipse(cx, cy, rx, ry) {
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2); ctx.fill();
+}
+
+// Eyes: cute big pupils with a white highlight
+function drawEye(cx, cy, r, lookSide = 0) {
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(cx + lookSide * r * 0.2, cy, r * 0.7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx + lookSide * r * 0.2 + r * 0.25, cy - r * 0.25, r * 0.25, 0, Math.PI * 2); ctx.fill();
+}
+
+// Smaller bead-eye for distant/small animals
+function drawBeadEye(cx, cy, r) {
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx + r * 0.35, cy - r * 0.35, r * 0.35, 0, Math.PI * 2); ctx.fill();
+}
+
+// Smile arc
+function drawSmile(cx, cy, r, color = '#5a3a2a') {
+  ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0.15, Math.PI - 0.15); ctx.stroke();
+}
+
+// =============================================================================
+// PUPPY (baby) + DOG (mom) — golden retriever style
+// =============================================================================
+function drawPuppy(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2 : 0;
+  // Legs
+  ctx.fillStyle = '#d9a468';
+  ctx.fillRect(-7, 6, 3, 6 + legSwing);
+  ctx.fillRect(-2, 6, 3, 6 - legSwing);
+  ctx.fillRect(3, 6, 3, 6 + legSwing);
+  ctx.fillRect(8, 6, 3, 6 - legSwing);
+  // Paws
+  ctx.fillStyle = '#fff5d9';
+  ctx.fillRect(-7, 11 + legSwing, 3, 2);
+  ctx.fillRect(-2, 11 - legSwing, 3, 2);
+  ctx.fillRect(3, 11 + legSwing, 3, 2);
+  ctx.fillRect(8, 11 - legSwing, 3, 2);
+  // Body
+  ctx.fillStyle = '#e8b878';
+  fillEllipse(2, 4, 11, 6);
+  // White belly
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(2, 7, 7, 3);
+  // Tail (wagging)
+  const tailWag = Math.sin((opts.bobPhase || 0) * 3) * 0.4;
+  ctx.fillStyle = '#d9a468';
+  ctx.save();
+  ctx.translate(-9, 1);
+  ctx.rotate(-0.4 + tailWag);
+  ctx.fillRect(0, -2, 5, 3);
+  ctx.beginPath(); ctx.arc(5, -0.5, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Head
+  ctx.fillStyle = '#e8b878';
+  fillEllipse(11, -1, 7, 6);
+  // Snout
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(15, 2, 4, 2.5);
+  // Ears (floppy)
+  ctx.fillStyle = '#b88040';
+  ctx.beginPath();
+  ctx.moveTo(7, -3); ctx.lineTo(4, 5); ctx.lineTo(8, 4); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(14, -4); ctx.lineTo(13, 4); ctx.lineTo(17, 3); ctx.closePath(); ctx.fill();
+  // Eye
+  drawEye(13, -1, 1.6);
+  // Nose
+  ctx.fillStyle = '#2a1a1a';
+  fillEllipse(17, 1, 1.4, 1);
+  // Mouth
+  drawSmile(15, 3, 1.2);
+  // Eyebrow tuft for cute
+  ctx.fillStyle = '#fff5d9';
+  ctx.beginPath(); ctx.arc(13, -3, 0.8, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawDog(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 3 : 0;
+  // Legs (longer)
+  ctx.fillStyle = '#c89058';
+  ctx.fillRect(-12, 8, 4, 12 + legSwing);
+  ctx.fillRect(-4, 8, 4, 12 - legSwing);
+  ctx.fillRect(6, 8, 4, 12 + legSwing);
+  ctx.fillRect(14, 8, 4, 12 - legSwing);
+  // Paws
+  ctx.fillStyle = '#3a2818';
+  ctx.fillRect(-12, 19 + legSwing, 4, 2);
+  ctx.fillRect(-4, 19 - legSwing, 4, 2);
+  ctx.fillRect(6, 19 + legSwing, 4, 2);
+  ctx.fillRect(14, 19 - legSwing, 4, 2);
+  // Body
+  ctx.fillStyle = '#e0a858';
+  fillEllipse(3, 4, 18, 9);
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(3, 9, 12, 4);
+  // Tail
+  const tailWag = Math.sin((opts.bobPhase || 0) * 2) * 0.3;
+  ctx.fillStyle = '#c89058';
+  ctx.save();
+  ctx.translate(-15, 0);
+  ctx.rotate(-0.5 + tailWag);
+  ctx.fillRect(0, -3, 9, 4);
+  ctx.beginPath(); ctx.arc(9, -1, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Head
+  ctx.fillStyle = '#e0a858';
+  fillEllipse(18, -3, 10, 8);
+  // Snout
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(24, 1, 6, 3.5);
+  // Ears
+  ctx.fillStyle = '#a06028';
+  ctx.beginPath();
+  ctx.moveTo(13, -7); ctx.lineTo(9, 5); ctx.lineTo(14, 4); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(22, -8); ctx.lineTo(21, 5); ctx.lineTo(26, 3); ctx.closePath(); ctx.fill();
+  // Eye
+  drawEye(20, -3, 2);
+  // Nose
+  ctx.fillStyle = '#1a1010';
+  fillEllipse(28, 0, 2, 1.5);
+  // Mouth
+  drawSmile(24, 3, 2);
+  // Collar
+  ctx.fillStyle = '#d83030';
+  ctx.fillRect(11, 3, 4, 3);
+  ctx.fillStyle = '#ffd44a';
+  ctx.beginPath(); ctx.arc(13, 7, 1.5, 0, Math.PI * 2); ctx.fill();
+}
+
+// =============================================================================
+// KITTEN + CAT (gray tabby)
+// =============================================================================
+function drawKitten(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2 : 0;
+  // Legs
+  ctx.fillStyle = '#9aa0aa';
+  ctx.fillRect(-6, 6, 3, 6 + legSwing);
+  ctx.fillRect(-1, 6, 3, 6 - legSwing);
+  ctx.fillRect(3, 6, 3, 6 + legSwing);
+  ctx.fillRect(7, 6, 3, 6 - legSwing);
+  // Paws
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-6, 11 + legSwing, 3, 2);
+  ctx.fillRect(-1, 11 - legSwing, 3, 2);
+  ctx.fillRect(3, 11 + legSwing, 3, 2);
+  ctx.fillRect(7, 11 - legSwing, 3, 2);
+  // Body
+  ctx.fillStyle = '#a8aeb8';
+  fillEllipse(2, 4, 10, 5.5);
+  // Tabby stripes
+  ctx.strokeStyle = '#6a707a'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(-5, 2); ctx.lineTo(-3, 5);
+  ctx.moveTo(0, 1); ctx.lineTo(2, 4);
+  ctx.moveTo(5, 2); ctx.lineTo(7, 5);
+  ctx.stroke();
+  // White chest
+  ctx.fillStyle = '#fff';
+  fillEllipse(2, 7, 5, 2);
+  // Tail (curled)
+  ctx.fillStyle = '#a8aeb8';
+  ctx.save();
+  ctx.translate(-9, 0);
+  const tailCurl = Math.sin((opts.bobPhase || 0) * 1.5) * 0.2;
+  ctx.rotate(-0.6 + tailCurl);
+  ctx.fillRect(0, -1, 7, 3);
+  ctx.beginPath(); ctx.arc(7, 0, 1.8, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Head
+  ctx.fillStyle = '#a8aeb8';
+  fillEllipse(11, -1, 6, 5.5);
+  // Tabby forehead stripes
+  ctx.strokeStyle = '#6a707a'; ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(9, -5); ctx.lineTo(10, -3);
+  ctx.moveTo(11, -5.5); ctx.lineTo(12, -3);
+  ctx.moveTo(13, -5); ctx.lineTo(14, -3);
+  ctx.stroke();
+  // Pointy ears
+  ctx.fillStyle = '#a8aeb8';
+  ctx.beginPath();
+  ctx.moveTo(7, -3); ctx.lineTo(6, -7); ctx.lineTo(10, -5); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(15, -3); ctx.lineTo(16, -7); ctx.lineTo(13, -5); ctx.closePath(); ctx.fill();
+  // Inner ear pink
+  ctx.fillStyle = '#ff99aa';
+  ctx.beginPath();
+  ctx.moveTo(7.5, -3.5); ctx.lineTo(7.5, -5.5); ctx.lineTo(9, -4.5); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(14.5, -3.5); ctx.lineTo(14.5, -5.5); ctx.lineTo(13, -4.5); ctx.closePath(); ctx.fill();
+  // Eyes (green for tabby cat)
+  ctx.fillStyle = '#7ec77a';
+  ctx.beginPath(); ctx.arc(9.5, -1, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(13, -1, 1.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(9.2, -1.6, 0.5, 1.5);
+  ctx.fillRect(12.7, -1.6, 0.5, 1.5);
+  // Nose pink
+  ctx.fillStyle = '#ff8aaa';
+  ctx.beginPath();
+  ctx.moveTo(11.2, 0.5); ctx.lineTo(10.2, 1.4); ctx.lineTo(12.2, 1.4); ctx.closePath(); ctx.fill();
+  // Mouth
+  ctx.strokeStyle = '#5a3a2a'; ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(11.2, 1.4); ctx.lineTo(11.2, 2.5);
+  ctx.moveTo(11.2, 2.5); ctx.quadraticCurveTo(10, 3, 9.5, 2.5);
+  ctx.moveTo(11.2, 2.5); ctx.quadraticCurveTo(12.4, 3, 13, 2.5);
+  ctx.stroke();
+  // Whiskers
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(8, 2); ctx.lineTo(5, 1.5);
+  ctx.moveTo(8, 2.5); ctx.lineTo(5, 3);
+  ctx.moveTo(14, 2); ctx.lineTo(17, 1.5);
+  ctx.moveTo(14, 2.5); ctx.lineTo(17, 3);
+  ctx.stroke();
+}
+
+function drawCat(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 3 : 0;
+  // Legs
+  ctx.fillStyle = '#8e94a0';
+  ctx.fillRect(-10, 8, 3.5, 12 + legSwing);
+  ctx.fillRect(-3, 8, 3.5, 12 - legSwing);
+  ctx.fillRect(5, 8, 3.5, 12 + legSwing);
+  ctx.fillRect(13, 8, 3.5, 12 - legSwing);
+  // Paws
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-10, 19 + legSwing, 3.5, 2);
+  ctx.fillRect(-3, 19 - legSwing, 3.5, 2);
+  ctx.fillRect(5, 19 + legSwing, 3.5, 2);
+  ctx.fillRect(13, 19 - legSwing, 3.5, 2);
+  // Body
+  ctx.fillStyle = '#a8aeb8';
+  fillEllipse(3, 4, 17, 8);
+  // Stripes
+  ctx.strokeStyle = '#6a707a'; ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(-8, 0); ctx.lineTo(-5, 5);
+  ctx.moveTo(-2, -2); ctx.lineTo(0, 5);
+  ctx.moveTo(5, -2); ctx.lineTo(7, 5);
+  ctx.moveTo(11, -1); ctx.lineTo(13, 5);
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  fillEllipse(3, 8, 9, 3);
+  // Long tail (S curve)
+  ctx.fillStyle = '#a8aeb8';
+  ctx.save();
+  ctx.translate(-15, 0);
+  const tailCurl = Math.sin((opts.bobPhase || 0) * 1.3) * 0.15;
+  ctx.rotate(-0.5 + tailCurl);
+  ctx.beginPath();
+  ctx.moveTo(0, -2);
+  ctx.bezierCurveTo(-8, -8, -4, -16, 4, -18);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#a8aeb8';
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(4, -18, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Head
+  ctx.fillStyle = '#a8aeb8';
+  fillEllipse(17, -3, 9, 8);
+  // Tabby M on forehead
+  ctx.strokeStyle = '#6a707a'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(13, -8); ctx.lineTo(15, -5);
+  ctx.moveTo(15, -5); ctx.lineTo(17, -8);
+  ctx.moveTo(17, -8); ctx.lineTo(19, -5);
+  ctx.moveTo(19, -5); ctx.lineTo(21, -8);
+  ctx.stroke();
+  // Ears (pointier, taller)
+  ctx.fillStyle = '#a8aeb8';
+  ctx.beginPath();
+  ctx.moveTo(11, -5); ctx.lineTo(10, -12); ctx.lineTo(15, -8); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(23, -5); ctx.lineTo(24, -12); ctx.lineTo(19, -8); ctx.closePath(); ctx.fill();
+  // Inner pink
+  ctx.fillStyle = '#ff99aa';
+  ctx.beginPath();
+  ctx.moveTo(12, -6); ctx.lineTo(12, -10); ctx.lineTo(14, -8); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(22, -6); ctx.lineTo(22, -10); ctx.lineTo(20, -8); ctx.closePath(); ctx.fill();
+  // Eyes
+  ctx.fillStyle = '#7ec77a';
+  ctx.beginPath(); ctx.arc(14.5, -3, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(19.5, -3, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(14, -4, 0.7, 2);
+  ctx.fillRect(19, -4, 0.7, 2);
+  // Nose
+  ctx.fillStyle = '#ff8aaa';
+  ctx.beginPath();
+  ctx.moveTo(17, -1); ctx.lineTo(15.5, 0.5); ctx.lineTo(18.5, 0.5); ctx.closePath(); ctx.fill();
+  // Mouth
+  ctx.strokeStyle = '#5a3a2a'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(17, 0.5); ctx.lineTo(17, 2);
+  ctx.moveTo(17, 2); ctx.quadraticCurveTo(15.5, 2.6, 14.5, 2);
+  ctx.moveTo(17, 2); ctx.quadraticCurveTo(18.5, 2.6, 19.5, 2);
+  ctx.stroke();
+  // Whiskers
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(13, 1); ctx.lineTo(8, 0);
+  ctx.moveTo(13, 2); ctx.lineTo(8, 2.5);
+  ctx.moveTo(21, 1); ctx.lineTo(26, 0);
+  ctx.moveTo(21, 2); ctx.lineTo(26, 2.5);
+  ctx.stroke();
+}
+
+// =============================================================================
+// BUNNY (white) + RABBIT
+// =============================================================================
+function drawBunny(opts) {
+  const w = opts.walkPhase || 0;
+  // Bunnies hop, so subtle bounce
+  const hop = opts.walking ? Math.abs(Math.sin(w * 0.5)) * 1.5 : 0;
+  // Hind legs (folded)
+  ctx.fillStyle = '#fafafa';
+  fillEllipse(-5, 9 - hop, 4, 3);
+  // Front legs
+  ctx.fillStyle = '#fafafa';
+  ctx.fillRect(2, 5 - hop, 2, 7);
+  ctx.fillRect(7, 5 - hop, 2, 7);
+  // Body
+  ctx.fillStyle = '#fafafa';
+  fillEllipse(2, 3 - hop, 9, 6);
+  // Belly highlight
+  ctx.fillStyle = '#e8e8e8';
+  fillEllipse(2, 6 - hop, 6, 2);
+  // Tail (puff)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-7, 2 - hop, 3, 0, Math.PI * 2); ctx.fill();
+  // Head
+  ctx.fillStyle = '#fafafa';
+  fillEllipse(9, -1 - hop, 5.5, 5);
+  // Ears (long, upright, one slightly bent)
+  ctx.fillStyle = '#fafafa';
+  ctx.save();
+  ctx.translate(7, -5 - hop);
+  ctx.rotate(-0.15);
+  fillEllipse(0, -5, 2, 6);
+  ctx.fillStyle = '#ffc0d0';
+  fillEllipse(0, -5, 1, 4);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(11, -5 - hop);
+  ctx.rotate(0.25);
+  ctx.fillStyle = '#fafafa';
+  fillEllipse(0, -5, 2, 6);
+  ctx.fillStyle = '#ffc0d0';
+  fillEllipse(0, -5, 1, 4);
+  ctx.restore();
+  // Eyes
+  drawBeadEye(7.5, -1 - hop, 1.2);
+  drawBeadEye(11, -1 - hop, 1.2);
+  // Nose (pink Y)
+  ctx.fillStyle = '#ff8aaa';
+  ctx.beginPath();
+  ctx.moveTo(9.5, 1 - hop); ctx.lineTo(8.5, 1.8 - hop); ctx.lineTo(10.5, 1.8 - hop); ctx.closePath(); ctx.fill();
+  // Mouth
+  ctx.strokeStyle = '#5a3a2a'; ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(9.5, 1.8 - hop); ctx.lineTo(9.5, 2.5 - hop);
+  ctx.moveTo(9.5, 2.5 - hop); ctx.quadraticCurveTo(8.5, 3 - hop, 8, 2.7 - hop);
+  ctx.moveTo(9.5, 2.5 - hop); ctx.quadraticCurveTo(10.5, 3 - hop, 11, 2.7 - hop);
+  ctx.stroke();
+  // Whiskers
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 0.4;
+  ctx.beginPath();
+  ctx.moveTo(7, 2 - hop); ctx.lineTo(4, 1.5 - hop);
+  ctx.moveTo(12, 2 - hop); ctx.lineTo(15, 1.5 - hop);
+  ctx.stroke();
+}
+
+function drawRabbit(opts) {
+  const w = opts.walkPhase || 0;
+  const hop = opts.walking ? Math.abs(Math.sin(w * 0.5)) * 2.5 : 0;
+  ctx.fillStyle = '#f4ede0';
+  // Hind legs
+  fillEllipse(-9, 12 - hop, 6, 5);
+  // Front legs
+  ctx.fillRect(2, 7 - hop, 3, 12);
+  ctx.fillRect(8, 7 - hop, 3, 12);
+  // Body
+  fillEllipse(2, 4 - hop, 14, 9);
+  // Belly
+  ctx.fillStyle = '#fafafa';
+  fillEllipse(2, 9 - hop, 9, 3.5);
+  // Tail
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-12, 3 - hop, 4, 0, Math.PI * 2); ctx.fill();
+  // Head
+  ctx.fillStyle = '#f4ede0';
+  fillEllipse(13, -2 - hop, 8, 7);
+  // Ears (longer, more upright)
+  ctx.save();
+  ctx.translate(11, -7 - hop);
+  ctx.rotate(-0.1);
+  ctx.fillStyle = '#f4ede0';
+  fillEllipse(0, -8, 3, 9);
+  ctx.fillStyle = '#ffc0d0';
+  fillEllipse(0, -8, 1.5, 6);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(15, -7 - hop);
+  ctx.rotate(0.15);
+  ctx.fillStyle = '#f4ede0';
+  fillEllipse(0, -8, 3, 9);
+  ctx.fillStyle = '#ffc0d0';
+  fillEllipse(0, -8, 1.5, 6);
+  ctx.restore();
+  // Eyes
+  drawEye(11, -2 - hop, 1.6);
+  drawEye(15.5, -2 - hop, 1.6);
+  // Nose
+  ctx.fillStyle = '#ff8aaa';
+  ctx.beginPath();
+  ctx.moveTo(13, 0.5 - hop); ctx.lineTo(11.5, 1.8 - hop); ctx.lineTo(14.5, 1.8 - hop); ctx.closePath(); ctx.fill();
+  // Mouth
+  ctx.strokeStyle = '#5a3a2a'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(13, 1.8 - hop); ctx.lineTo(13, 3 - hop);
+  ctx.moveTo(13, 3 - hop); ctx.quadraticCurveTo(11.5, 3.6 - hop, 11, 3.2 - hop);
+  ctx.moveTo(13, 3 - hop); ctx.quadraticCurveTo(14.5, 3.6 - hop, 15, 3.2 - hop);
+  ctx.stroke();
+  // Whiskers
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.moveTo(10, 2 - hop); ctx.lineTo(5, 1.5 - hop);
+  ctx.moveTo(10, 3 - hop); ctx.lineTo(5, 3.5 - hop);
+  ctx.moveTo(16, 2 - hop); ctx.lineTo(21, 1.5 - hop);
+  ctx.moveTo(16, 3 - hop); ctx.lineTo(21, 3.5 - hop);
+  ctx.stroke();
+  // Buck teeth
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(12.2, 3 - hop, 0.8, 1.5);
+  ctx.fillRect(13.2, 3 - hop, 0.8, 1.5);
+}
+
+// =============================================================================
+// FAWN + DEER (white-tailed deer)
+// =============================================================================
+function drawFawn(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2 : 0;
+  // Long thin legs
+  ctx.fillStyle = '#c89058';
+  ctx.fillRect(-7, 3, 2, 14 + legSwing);
+  ctx.fillRect(-2, 3, 2, 14 - legSwing);
+  ctx.fillRect(4, 3, 2, 14 + legSwing);
+  ctx.fillRect(9, 3, 2, 14 - legSwing);
+  // Hooves
+  ctx.fillStyle = '#3a2a1a';
+  ctx.fillRect(-7, 16 + legSwing, 2, 1.5);
+  ctx.fillRect(-2, 16 - legSwing, 2, 1.5);
+  ctx.fillRect(4, 16 + legSwing, 2, 1.5);
+  ctx.fillRect(9, 16 - legSwing, 2, 1.5);
+  // Body
+  ctx.fillStyle = '#d8a868';
+  fillEllipse(2, 0, 10, 5);
+  // White belly
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(2, 3, 7, 2);
+  // White spots
+  ctx.fillStyle = '#fff5d9';
+  ctx.beginPath(); ctx.arc(-2, -1, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(3, -2, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7, -1, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-4, 1, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(5, 1, 0.8, 0, Math.PI * 2); ctx.fill();
+  // Tail (small white)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(-7, -1, 1.5, 0, Math.PI * 2); ctx.fill();
+  // Neck
+  ctx.fillStyle = '#d8a868';
+  ctx.beginPath();
+  ctx.moveTo(7, -3); ctx.lineTo(11, -8); ctx.lineTo(13, -7); ctx.lineTo(11, -2); ctx.closePath(); ctx.fill();
+  // Head
+  ctx.fillStyle = '#d8a868';
+  fillEllipse(13, -8, 5, 4);
+  // White muzzle
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(16, -7, 2.5, 1.5);
+  // Ears (big upright)
+  ctx.fillStyle = '#d8a868';
+  ctx.save();
+  ctx.translate(11, -11);
+  ctx.rotate(-0.4);
+  fillEllipse(0, -2, 1.5, 3);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(15, -12);
+  ctx.rotate(0.2);
+  fillEllipse(0, -2, 1.5, 3);
+  ctx.fillStyle = '#ffaabb';
+  fillEllipse(0, -2, 0.8, 2);
+  ctx.restore();
+  // Eye
+  drawBeadEye(14, -8, 1.2);
+  // Nose
+  ctx.fillStyle = '#1a0a0a';
+  fillEllipse(17, -7, 0.8, 0.6);
+  // Mouth
+  drawSmile(16, -6, 1);
+}
+
+function drawDeer(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 3 : 0;
+  // Long legs
+  ctx.fillStyle = '#a87838';
+  ctx.fillRect(-12, 6, 3, 24 + legSwing);
+  ctx.fillRect(-5, 6, 3, 24 - legSwing);
+  ctx.fillRect(7, 6, 3, 24 + legSwing);
+  ctx.fillRect(14, 6, 3, 24 - legSwing);
+  // Hooves
+  ctx.fillStyle = '#1a0a0a';
+  ctx.fillRect(-12, 28 + legSwing, 3, 2);
+  ctx.fillRect(-5, 28 - legSwing, 3, 2);
+  ctx.fillRect(7, 28 + legSwing, 3, 2);
+  ctx.fillRect(14, 28 - legSwing, 3, 2);
+  // Body
+  ctx.fillStyle = '#b88848';
+  fillEllipse(3, 2, 16, 8);
+  // Belly
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(3, 8, 11, 3);
+  // Tail (white)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(-13, -2); ctx.lineTo(-15, -6); ctx.lineTo(-11, -3); ctx.closePath(); ctx.fill();
+  // Neck (curved up)
+  ctx.fillStyle = '#b88848';
+  ctx.beginPath();
+  ctx.moveTo(11, -6); ctx.lineTo(18, -16); ctx.lineTo(22, -15); ctx.lineTo(15, -2); ctx.closePath(); ctx.fill();
+  // Head
+  ctx.fillStyle = '#b88848';
+  fillEllipse(22, -17, 7, 5);
+  // White muzzle
+  ctx.fillStyle = '#fff5d9';
+  fillEllipse(27, -16, 3.5, 2);
+  // Ears
+  ctx.fillStyle = '#b88848';
+  ctx.save();
+  ctx.translate(19, -22);
+  ctx.rotate(-0.4);
+  fillEllipse(0, -3, 2, 5);
+  ctx.fillStyle = '#ffaabb';
+  fillEllipse(0, -3, 1, 3.5);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(24, -22);
+  ctx.rotate(0.2);
+  ctx.fillStyle = '#b88848';
+  fillEllipse(0, -3, 2, 5);
+  ctx.fillStyle = '#ffaabb';
+  fillEllipse(0, -3, 1, 3.5);
+  ctx.restore();
+  // Eye
+  drawEye(23, -17, 1.5);
+  // Nose
+  ctx.fillStyle = '#1a0a0a';
+  fillEllipse(28.5, -15.5, 1.5, 1);
+  // Mouth
+  drawSmile(27, -14, 1.5);
+}
+
+// =============================================================================
+// DUCKLING + DUCK
+// =============================================================================
+function drawDuckling(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 1.5 : 0;
+  // Feet (orange)
+  ctx.fillStyle = '#ff9933';
+  ctx.beginPath();
+  ctx.moveTo(-3 + legSwing, 8); ctx.lineTo(-5 + legSwing, 11); ctx.lineTo(0 + legSwing, 11); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(3 - legSwing, 8); ctx.lineTo(1 - legSwing, 11); ctx.lineTo(6 - legSwing, 11); ctx.closePath(); ctx.fill();
+  // Body (round yellow)
+  ctx.fillStyle = '#ffe888';
+  fillEllipse(0, 2, 9, 7);
+  // Wing detail
+  ctx.fillStyle = '#ffd44a';
+  fillEllipse(-3, 1, 4, 3);
+  // Head
+  ctx.fillStyle = '#fff0a0';
+  fillEllipse(7, -3, 6, 5);
+  // Beak
+  ctx.fillStyle = '#ff9933';
+  ctx.beginPath();
+  ctx.moveTo(11, -3); ctx.lineTo(15, -2); ctx.lineTo(15, -1); ctx.lineTo(11, 0); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#cc6600';
+  ctx.beginPath(); ctx.moveTo(11, -1); ctx.lineTo(15, -1.5); ctx.lineTo(15, -1); ctx.lineTo(11, 0); ctx.closePath(); ctx.fill();
+  // Eye
+  drawBeadEye(8, -4, 1.3);
+  // Cute fluff on top
+  ctx.fillStyle = '#fff5b8';
+  ctx.beginPath(); ctx.arc(7, -8, 1.2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(5, -7.5, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(9, -7.5, 1, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawDuck(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2 : 0;
+  // Feet
+  ctx.fillStyle = '#ff7700';
+  ctx.beginPath();
+  ctx.moveTo(-5 + legSwing, 13); ctx.lineTo(-9 + legSwing, 17); ctx.lineTo(-1 + legSwing, 17); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(5 - legSwing, 13); ctx.lineTo(1 - legSwing, 17); ctx.lineTo(9 - legSwing, 17); ctx.closePath(); ctx.fill();
+  // Body (mallard female-ish brown)
+  ctx.fillStyle = '#a0825a';
+  fillEllipse(0, 4, 14, 9);
+  // Speckle pattern
+  ctx.fillStyle = '#704818';
+  ctx.beginPath(); ctx.arc(-6, 2, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-3, 5, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(2, 1, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(5, 5, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-7, 6, 0.8, 0, Math.PI * 2); ctx.fill();
+  // Wing
+  ctx.fillStyle = '#7a5230';
+  fillEllipse(-2, 3, 7, 4);
+  // Speculum (blue/purple wing patch)
+  ctx.fillStyle = '#5a6aaa';
+  fillEllipse(-2, 3, 4, 1.5);
+  // Tail tip
+  ctx.fillStyle = '#503818';
+  ctx.beginPath();
+  ctx.moveTo(-12, 1); ctx.lineTo(-16, -1); ctx.lineTo(-12, 4); ctx.closePath(); ctx.fill();
+  // Neck/head (greener for mallard? we'll do female brown for both consistency)
+  ctx.fillStyle = '#a0825a';
+  fillEllipse(10, -3, 7, 6);
+  // Head stripes (speculum-like markings on female)
+  ctx.fillStyle = '#704818';
+  ctx.fillRect(8, -5, 6, 0.8);
+  // Eye
+  drawBeadEye(11, -3, 1.5);
+  // Eye stripe
+  ctx.strokeStyle = '#503818'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(7, -3); ctx.lineTo(14, -2);
+  ctx.stroke();
+  // Beak
+  ctx.fillStyle = '#ddaa44';
+  ctx.beginPath();
+  ctx.moveTo(15, -3); ctx.lineTo(21, -2); ctx.lineTo(21, 0); ctx.lineTo(15, 1); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#aa7733';
+  ctx.beginPath(); ctx.moveTo(15, 0); ctx.lineTo(21, -0.5); ctx.lineTo(21, 0); ctx.lineTo(15, 1); ctx.closePath(); ctx.fill();
+}
+
+// =============================================================================
+// BEAR CUB + MAMA BEAR (brown bear)
+// =============================================================================
+function drawCub(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 1.5 : 0;
+  // Legs
+  ctx.fillStyle = '#7a4a28';
+  ctx.fillRect(-7, 7, 4, 7 + legSwing);
+  ctx.fillRect(-1, 7, 4, 7 - legSwing);
+  ctx.fillRect(4, 7, 4, 7 + legSwing);
+  ctx.fillRect(9, 7, 4, 7 - legSwing);
+  // Paws
+  ctx.fillStyle = '#3a1a08';
+  ctx.fillRect(-7, 13 + legSwing, 4, 2);
+  ctx.fillRect(-1, 13 - legSwing, 4, 2);
+  ctx.fillRect(4, 13 + legSwing, 4, 2);
+  ctx.fillRect(9, 13 - legSwing, 4, 2);
+  // Body (round and chubby)
+  ctx.fillStyle = '#9c6438';
+  fillEllipse(3, 4, 11, 7);
+  // Belly highlight
+  ctx.fillStyle = '#c08858';
+  fillEllipse(3, 7, 7, 3);
+  // Head
+  ctx.fillStyle = '#9c6438';
+  fillEllipse(13, -1, 7, 6);
+  // Snout (lighter)
+  ctx.fillStyle = '#d8a878';
+  fillEllipse(17, 2, 4, 2.5);
+  // Round ears
+  ctx.fillStyle = '#7a4a28';
+  ctx.beginPath(); ctx.arc(9, -5, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(17, -5, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#9c6438';
+  ctx.beginPath(); ctx.arc(9, -4.5, 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(17, -4.5, 1.4, 0, Math.PI * 2); ctx.fill();
+  // Eyes
+  drawBeadEye(11, -1, 1.2);
+  drawBeadEye(15, -1, 1.2);
+  // Nose (large)
+  ctx.fillStyle = '#1a0a08';
+  fillEllipse(18, 1, 1.5, 1.2);
+  // Mouth
+  ctx.strokeStyle = '#3a1a08'; ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  ctx.moveTo(18, 2); ctx.lineTo(18, 3);
+  ctx.moveTo(18, 3); ctx.quadraticCurveTo(17, 3.5, 16.3, 3);
+  ctx.moveTo(18, 3); ctx.quadraticCurveTo(19, 3.5, 19.7, 3);
+  ctx.stroke();
+}
+
+function drawBear(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2.5 : 0;
+  // Legs (substantial)
+  ctx.fillStyle = '#603818';
+  ctx.fillRect(-12, 10, 6, 12 + legSwing);
+  ctx.fillRect(-3, 10, 6, 12 - legSwing);
+  ctx.fillRect(7, 10, 6, 12 + legSwing);
+  ctx.fillRect(15, 10, 6, 12 - legSwing);
+  // Paws
+  ctx.fillStyle = '#1a0a08';
+  ctx.fillRect(-12, 21 + legSwing, 6, 2);
+  ctx.fillRect(-3, 21 - legSwing, 6, 2);
+  ctx.fillRect(7, 21 + legSwing, 6, 2);
+  ctx.fillRect(15, 21 - legSwing, 6, 2);
+  // Claws on front paws
+  ctx.fillStyle = '#fafafa';
+  for (let i = 0; i < 3; i++) {
+    ctx.fillRect(8 + i * 2, 22 - legSwing, 1, 1);
+    ctx.fillRect(16 + i * 2, 22 - legSwing, 1, 1);
+  }
+  // Body
+  ctx.fillStyle = '#7a4828';
+  fillEllipse(3, 5, 18, 11);
+  // Belly
+  ctx.fillStyle = '#9c6438';
+  fillEllipse(3, 9, 12, 4);
+  // Head
+  ctx.fillStyle = '#7a4828';
+  fillEllipse(20, -2, 11, 9);
+  // Snout
+  ctx.fillStyle = '#b88858';
+  fillEllipse(27, 1, 6, 4);
+  // Ears
+  ctx.fillStyle = '#603818';
+  ctx.beginPath(); ctx.arc(14, -8, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(26, -8, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#7a4828';
+  ctx.beginPath(); ctx.arc(14, -7, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(26, -7, 2, 0, Math.PI * 2); ctx.fill();
+  // Eyes
+  drawBeadEye(17, -2, 1.6);
+  drawBeadEye(23, -2, 1.6);
+  // Nose
+  ctx.fillStyle = '#1a0a08';
+  fillEllipse(29, 0, 2.5, 2);
+  // Mouth
+  ctx.strokeStyle = '#1a0a08'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(29, 2); ctx.lineTo(29, 3.5);
+  ctx.moveTo(29, 3.5); ctx.quadraticCurveTo(27, 4.5, 26, 3.5);
+  ctx.moveTo(29, 3.5); ctx.quadraticCurveTo(31, 4.5, 32, 3.5);
+  ctx.stroke();
+}
+
+// =============================================================================
+// FOX KIT + FOX
+// =============================================================================
+function drawKit(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 1.5 : 0;
+  // Legs
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(-6, 7, 3, 6 + legSwing);
+  ctx.fillRect(-1, 7, 3, 6 - legSwing);
+  ctx.fillRect(3, 7, 3, 6 + legSwing);
+  ctx.fillRect(8, 7, 3, 6 - legSwing);
+  // Body
+  ctx.fillStyle = '#d87830';
+  fillEllipse(2, 4, 10, 5.5);
+  // White belly
+  ctx.fillStyle = '#fff5e0';
+  fillEllipse(2, 7, 7, 2.5);
+  // Bushy tail with white tip
+  ctx.fillStyle = '#d87830';
+  ctx.save();
+  ctx.translate(-9, 1);
+  ctx.rotate(-0.4);
+  fillEllipse(0, 0, 5, 3);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(4, 0, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Head (more triangular)
+  ctx.fillStyle = '#d87830';
+  ctx.beginPath();
+  ctx.moveTo(8, -2); ctx.lineTo(11, -5); ctx.lineTo(15, -5); ctx.lineTo(18, -2); ctx.lineTo(17, 3); ctx.lineTo(9, 3); ctx.closePath(); ctx.fill();
+  // White cheeks
+  ctx.fillStyle = '#fff5e0';
+  ctx.beginPath();
+  ctx.moveTo(10, 0); ctx.lineTo(13, 4); ctx.lineTo(14, 0); ctx.closePath(); ctx.fill();
+  // Ears (pointed)
+  ctx.fillStyle = '#d87830';
+  ctx.beginPath();
+  ctx.moveTo(9, -4); ctx.lineTo(8, -8); ctx.lineTo(12, -5); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(17, -4); ctx.lineTo(18, -8); ctx.lineTo(14, -5); ctx.closePath(); ctx.fill();
+  // Black ear tips
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.moveTo(8.5, -7); ctx.lineTo(9.5, -7); ctx.lineTo(8, -8); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(17.5, -7); ctx.lineTo(18.5, -7); ctx.lineTo(18, -8); ctx.closePath(); ctx.fill();
+  // Eyes
+  drawBeadEye(11, -1, 1.2);
+  drawBeadEye(15, -1, 1.2);
+  // Nose (black on pointy snout)
+  ctx.fillStyle = '#1a1a1a';
+  fillEllipse(17.5, 0, 1.2, 0.8);
+  // Mouth
+  ctx.strokeStyle = '#3a1a08'; ctx.lineWidth = 0.7;
+  ctx.beginPath();
+  ctx.moveTo(17.5, 0.8); ctx.lineTo(17.5, 1.8);
+  ctx.moveTo(17.5, 1.8); ctx.quadraticCurveTo(16, 2.4, 15, 2);
+  ctx.stroke();
+}
+
+function drawFox(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2.5 : 0;
+  // Legs (with black socks)
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(-10, 10, 3, 14 + legSwing);
+  ctx.fillRect(-3, 10, 3, 14 - legSwing);
+  ctx.fillRect(5, 10, 3, 14 + legSwing);
+  ctx.fillRect(13, 10, 3, 14 - legSwing);
+  // Body
+  ctx.fillStyle = '#c66828';
+  fillEllipse(3, 5, 16, 8);
+  // White belly
+  ctx.fillStyle = '#fff5e0';
+  fillEllipse(3, 10, 11, 3.5);
+  // Big bushy tail
+  ctx.fillStyle = '#c66828';
+  ctx.save();
+  ctx.translate(-13, 2);
+  ctx.rotate(-0.5);
+  fillEllipse(0, 0, 8, 5);
+  fillEllipse(-3, -1, 6, 4);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(6, 0, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // Head (triangular, longer)
+  ctx.fillStyle = '#c66828';
+  ctx.beginPath();
+  ctx.moveTo(11, -4); ctx.lineTo(15, -7); ctx.lineTo(22, -7); ctx.lineTo(28, -2); ctx.lineTo(26, 3); ctx.lineTo(13, 4); ctx.closePath(); ctx.fill();
+  // White cheeks/chest
+  ctx.fillStyle = '#fff5e0';
+  ctx.beginPath();
+  ctx.moveTo(13, 1); ctx.lineTo(20, 5); ctx.lineTo(22, -1); ctx.closePath(); ctx.fill();
+  // White muzzle
+  ctx.fillStyle = '#fff5e0';
+  fillEllipse(25, 1, 3, 1.8);
+  // Ears
+  ctx.fillStyle = '#c66828';
+  ctx.beginPath();
+  ctx.moveTo(13, -6); ctx.lineTo(11, -12); ctx.lineTo(17, -7); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(22, -6); ctx.lineTo(24, -12); ctx.lineTo(19, -7); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.moveTo(11.5, -10); ctx.lineTo(12.5, -10); ctx.lineTo(11, -12); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(23.5, -10); ctx.lineTo(24.5, -10); ctx.lineTo(24, -12); ctx.closePath(); ctx.fill();
+  // Inner ear pink
+  ctx.fillStyle = '#ffaa88';
+  ctx.beginPath();
+  ctx.moveTo(13, -7); ctx.lineTo(13, -10); ctx.lineTo(15, -8); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(22, -7); ctx.lineTo(22, -10); ctx.lineTo(20, -8); ctx.closePath(); ctx.fill();
+  // Eyes (amber)
+  ctx.fillStyle = '#ffaa44';
+  ctx.beginPath(); ctx.arc(15, -3, 1.7, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(20, -3, 1.7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(15, -3, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(20, -3, 0.8, 0, Math.PI * 2); ctx.fill();
+  // Nose
+  ctx.fillStyle = '#1a1a1a';
+  fillEllipse(28, 0, 1.7, 1.2);
+  // Mouth
+  ctx.strokeStyle = '#3a1a08'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(28, 1.2); ctx.lineTo(28, 2.5);
+  ctx.moveTo(28, 2.5); ctx.quadraticCurveTo(26, 3.4, 25, 2.8);
+  ctx.stroke();
+}
+
+// =============================================================================
+// LAMB + SHEEP
+// =============================================================================
+function drawLamb(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2 : 0;
+  // Legs (black)
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(-6, 4, 2.5, 11 + legSwing);
+  ctx.fillRect(-1, 4, 2.5, 11 - legSwing);
+  ctx.fillRect(4, 4, 2.5, 11 + legSwing);
+  ctx.fillRect(9, 4, 2.5, 11 + legSwing);
+  // Body (cloud-fluffy)
+  ctx.fillStyle = '#fafafa';
+  fillEllipse(2, 1, 11, 7);
+  // Wool puffs
+  ctx.beginPath(); ctx.arc(-6, -1, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-3, 4, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(2, -3, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(7, -2, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(9, 3, 3, 0, Math.PI * 2); ctx.fill();
+  // Tail
+  ctx.beginPath(); ctx.arc(-9, 0, 2, 0, Math.PI * 2); ctx.fill();
+  // Head (pink/gray face)
+  ctx.fillStyle = '#3a1a18';
+  fillEllipse(13, -1, 5, 4.5);
+  // Lighter snout
+  ctx.fillStyle = '#5a382a';
+  fillEllipse(16, 1, 2.5, 1.8);
+  // Ears (floppy, dark)
+  ctx.fillStyle = '#3a1a18';
+  ctx.save();
+  ctx.translate(10, -3);
+  ctx.rotate(-0.7);
+  fillEllipse(0, 0, 1.5, 3);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(15, -4);
+  ctx.rotate(0.7);
+  fillEllipse(0, 0, 1.5, 3);
+  ctx.restore();
+  // Tuft of wool on top of head
+  ctx.fillStyle = '#fafafa';
+  ctx.beginPath(); ctx.arc(13, -4, 2, 0, Math.PI * 2); ctx.fill();
+  // Eyes (white showing on dark face)
+  drawBeadEye(11.5, -1, 1.2);
+  drawBeadEye(14.5, -1, 1.2);
+  // Nose
+  ctx.fillStyle = '#1a0a08';
+  fillEllipse(17, 0.5, 0.8, 0.6);
+  // Mouth
+  drawSmile(16, 2, 1.2, '#1a0a08');
+}
+
+function drawSheep(opts) {
+  const w = opts.walkPhase || 0;
+  const legSwing = opts.walking ? Math.sin(w) * 2.5 : 0;
+  // Legs
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(-10, 6, 3, 16 + legSwing);
+  ctx.fillRect(-3, 6, 3, 16 - legSwing);
+  ctx.fillRect(7, 6, 3, 16 + legSwing);
+  ctx.fillRect(14, 6, 3, 16 - legSwing);
+  // Body (huge fluffy wool)
+  ctx.fillStyle = '#f0eadc';
+  fillEllipse(3, 0, 18, 11);
+  // Wool puffs
+  for (let i = 0; i < 9; i++) {
+    const angle = (i / 9) * Math.PI * 2;
+    const r = 11;
+    const px = 3 + Math.cos(angle) * 14;
+    const py = 0 + Math.sin(angle) * 8;
+    ctx.beginPath(); ctx.arc(px, py, 4.5, 0, Math.PI * 2); ctx.fill();
+  }
+  // Tail
+  ctx.beginPath(); ctx.arc(-15, -1, 3, 0, Math.PI * 2); ctx.fill();
+  // Head
+  ctx.fillStyle = '#3a1a18';
+  fillEllipse(20, -2, 7, 6);
+  ctx.fillStyle = '#5a382a';
+  fillEllipse(25, 1, 3.5, 2.5);
+  // Wool tuft on forehead
+  ctx.fillStyle = '#f0eadc';
+  ctx.beginPath(); ctx.arc(18, -7, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(21, -8, 3, 0, Math.PI * 2); ctx.fill();
+  // Ears
+  ctx.fillStyle = '#3a1a18';
+  ctx.save();
+  ctx.translate(15, -4);
+  ctx.rotate(-0.8);
+  fillEllipse(0, 0, 2.5, 5);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(24, -5);
+  ctx.rotate(0.8);
+  fillEllipse(0, 0, 2.5, 5);
+  ctx.restore();
+  // Eyes
+  drawBeadEye(18, -2, 1.5);
+  drawBeadEye(22, -2, 1.5);
+  // Nose
+  ctx.fillStyle = '#1a0a08';
+  fillEllipse(26.5, 0, 1.2, 0.9);
+  // Mouth
+  drawSmile(26, 2, 1.5, '#1a0a08');
+}
+
+// =============================================================================
+// ANIMAL DISPATCH
+// =============================================================================
+function drawAnimalAt(speciesId, isMom, x, y, opts = {}) {
+  ctx.save();
+  ctx.translate(x, y);
+  if (opts.dir === -1) ctx.scale(-1, 1);
+  if (isMom) {
+    switch (speciesId) {
+      case 'puppy': drawDog(opts); break;
+      case 'kitten': drawCat(opts); break;
+      case 'bunny': drawRabbit(opts); break;
+      case 'fawn': drawDeer(opts); break;
+      case 'duckling': drawDuck(opts); break;
+      case 'cub': drawBear(opts); break;
+      case 'kit': drawFox(opts); break;
+      case 'lamb': drawSheep(opts); break;
+    }
+  } else {
+    switch (speciesId) {
+      case 'puppy': drawPuppy(opts); break;
+      case 'kitten': drawKitten(opts); break;
+      case 'bunny': drawBunny(opts); break;
+      case 'fawn': drawFawn(opts); break;
+      case 'duckling': drawDuckling(opts); break;
+      case 'cub': drawCub(opts); break;
+      case 'kit': drawKit(opts); break;
+      case 'lamb': drawLamb(opts); break;
+    }
+  }
+  ctx.restore();
+}
+
+// =============================================================================
+// OBSTACLES — trees, pines, fences, cars, boulders, snowmen
+// =============================================================================
+function generateObstacles(theme, babyPositions) {
+  const list = [];
+  // Candidate slots — gaps between babies, away from the vet zone
+  const candidates = [];
+  // Sort baby positions ascending
+  const sorted = babyPositions.slice().sort((a, b) => a - b);
+  // Add gaps between consecutive baby positions, skipping the vet zone
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i], b = sorted[i + 1];
+    const gap = b - a;
+    if (gap > 200) {
+      // Skip if this gap straddles the vet zone
+      const mid = (a + b) / 2;
+      if (mid > VET.x - 80 && mid < VET.x + VET.w + 80) continue;
+      candidates.push(Math.round(a + gap * 0.5));
+    } else if (gap > 130) {
+      candidates.push(Math.round(a + gap * 0.5));
+    }
+  }
+  // Edge candidates (left/right of world)
+  candidates.push(120);
+  candidates.push(WORLD_W - 120);
+  // Shuffle so themes mix
+  candidates.sort(() => Math.random() - 0.5);
+  // Pick obstacle types from theme mix
+  const mix = theme.obstacleMix.slice().sort(() => Math.random() - 0.5);
+  for (let i = 0; i < candidates.length && i < 9; i++) {
+    const type = mix[i % mix.length];
+    list.push(makeObstacle(type, candidates[i]));
+  }
+  return list;
+}
+
+function makeObstacle(type, x) {
+  return { type, x, phase: Math.random() * Math.PI * 2 };
+}
+
+// AABB used for helicopter / cage collision and as a "no-spawn" hint
+function obstacleCollider(o) {
+  const gy = groundY();
+  switch (o.type) {
+    case 'tree':    return { x: o.x - 28, y: gy - 96,  w: 56, h: 96  };
+    case 'pine':    return { x: o.x - 18, y: gy - 110, w: 36, h: 110 };
+    case 'fence':   return { x: o.x - 40, y: gy - 22,  w: 80, h: 22  };
+    case 'car':     return { x: o.x - 38, y: gy - 32,  w: 76, h: 32  };
+    case 'boulder': return { x: o.x - 28, y: gy - 30,  w: 56, h: 30  };
+    case 'snowman': return { x: o.x - 14, y: gy - 50,  w: 28, h: 50  };
+    default:        return { x: o.x - 10, y: gy - 20,  w: 20, h: 20  };
+  }
+}
+
+function drawObstacle(o) {
+  const sx = o.x - camera.x;
+  const gy = groundY();
+  if (sx < -120 || sx > W + 120) return;
+  const t = currentTheme;
+
+  switch (o.type) {
+    case 'tree': {
+      // Big leafy oak/maple
+      // Trunk
+      ctx.fillStyle = '#5a3818';
+      ctx.fillRect(sx - 6, gy - 50, 12, 50);
+      ctx.fillStyle = '#3a2410';
+      ctx.fillRect(sx - 6, gy - 50, 2, 50);
+      // Canopy — three overlapping fluffs
+      const sway = Math.sin(o.phase + Date.now() * 0.0007) * 2;
+      const leafColor = t.id === 'storm' ? '#3a5a3a' : (t.id === 'snow' ? '#5a7a4a' : '#4a8a3a');
+      ctx.fillStyle = leafColor;
+      ctx.beginPath(); ctx.arc(sx - 18 + sway, gy - 60, 22, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + 16 + sway, gy - 62, 24, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + sway, gy - 80, 26, 0, Math.PI * 2); ctx.fill();
+      // Highlight
+      ctx.fillStyle = t.id === 'storm' ? '#5a7a4a' : '#7ac868';
+      ctx.beginPath(); ctx.arc(sx - 8 + sway, gy - 82, 8, 0, Math.PI * 2); ctx.fill();
+      // Snow on top in winter
+      if (t.id === 'snow') {
+        ctx.fillStyle = '#fafafa';
+        ctx.beginPath(); ctx.arc(sx + sway, gy - 92, 12, Math.PI, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(sx - 14 + sway, gy - 70, 8, Math.PI, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(sx + 14 + sway, gy - 72, 9, Math.PI, Math.PI * 2); ctx.fill();
+      }
+      break;
+    }
+    case 'pine': {
+      // Conifer — triangular tiers
+      ctx.fillStyle = '#3a2410';
+      ctx.fillRect(sx - 4, gy - 22, 8, 22);
+      const tierColor = t.id === 'snow' ? '#3a6040' : '#2a6a3a';
+      ctx.fillStyle = tierColor;
+      ctx.beginPath();
+      ctx.moveTo(sx - 22, gy - 22);
+      ctx.lineTo(sx, gy - 56);
+      ctx.lineTo(sx + 22, gy - 22);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(sx - 18, gy - 50);
+      ctx.lineTo(sx, gy - 82);
+      ctx.lineTo(sx + 18, gy - 50);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(sx - 14, gy - 78);
+      ctx.lineTo(sx, gy - 110);
+      ctx.lineTo(sx + 14, gy - 78);
+      ctx.closePath(); ctx.fill();
+      // Snow accent
+      if (t.id === 'snow') {
+        ctx.fillStyle = '#fafafa';
+        ctx.beginPath();
+        ctx.moveTo(sx - 22, gy - 22); ctx.lineTo(sx - 20, gy - 26); ctx.lineTo(sx - 14, gy - 22);
+        ctx.moveTo(sx + 14, gy - 22); ctx.lineTo(sx + 20, gy - 26); ctx.lineTo(sx + 22, gy - 22);
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(sx - 18, gy - 50); ctx.lineTo(sx - 14, gy - 56); ctx.lineTo(sx - 8, gy - 50);
+        ctx.moveTo(sx + 8, gy - 50); ctx.lineTo(sx + 14, gy - 56); ctx.lineTo(sx + 18, gy - 50);
+        ctx.fill();
+        ctx.fillRect(sx - 1, gy - 112, 2, 4);
+      }
+      break;
+    }
+    case 'fence': {
+      // Wooden picket fence
+      const x0 = sx - 40, y0 = gy - 22;
+      // Horizontal rails
+      ctx.fillStyle = '#8a5a30';
+      ctx.fillRect(x0, y0 + 4, 80, 3);
+      ctx.fillRect(x0, y0 + 14, 80, 3);
+      // Pickets
+      ctx.fillStyle = '#a87238';
+      for (let i = 0; i < 8; i++) {
+        const px = x0 + i * 10;
+        ctx.beginPath();
+        ctx.moveTo(px, y0 + 22);
+        ctx.lineTo(px, y0 + 4);
+        ctx.lineTo(px + 4, y0);
+        ctx.lineTo(px + 8, y0 + 4);
+        ctx.lineTo(px + 8, y0 + 22);
+        ctx.closePath(); ctx.fill();
+      }
+      // Highlight
+      ctx.fillStyle = 'rgba(255,255,255,0.15)';
+      for (let i = 0; i < 8; i++) ctx.fillRect(x0 + i * 10, y0 + 4, 1, 18);
+      // Snow on top in winter
+      if (t.id === 'snow') {
+        ctx.fillStyle = '#fafafa';
+        for (let i = 0; i < 8; i++) ctx.fillRect(x0 + i * 10, y0 - 2, 8, 3);
+      }
+      break;
+    }
+    case 'car': {
+      // Cute parked car (red)
+      const x0 = sx - 38, y0 = gy - 32;
+      // Body
+      ctx.fillStyle = '#d04848';
+      ctx.fillRect(x0 + 6, y0 + 8, 70, 18);
+      // Cabin
+      ctx.fillStyle = '#a83838';
+      ctx.beginPath();
+      ctx.moveTo(x0 + 18, y0 + 8);
+      ctx.lineTo(x0 + 26, y0 - 2);
+      ctx.lineTo(x0 + 56, y0 - 2);
+      ctx.lineTo(x0 + 64, y0 + 8);
+      ctx.closePath(); ctx.fill();
+      // Windows
+      ctx.fillStyle = '#bfe2ff';
+      ctx.beginPath();
+      ctx.moveTo(x0 + 22, y0 + 8);
+      ctx.lineTo(x0 + 28, y0 + 1);
+      ctx.lineTo(x0 + 40, y0 + 1);
+      ctx.lineTo(x0 + 40, y0 + 8);
+      ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x0 + 42, y0 + 1);
+      ctx.lineTo(x0 + 54, y0 + 1);
+      ctx.lineTo(x0 + 60, y0 + 8);
+      ctx.lineTo(x0 + 42, y0 + 8);
+      ctx.closePath(); ctx.fill();
+      // Door line
+      ctx.strokeStyle = '#7a2828'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x0 + 41, y0 + 8); ctx.lineTo(x0 + 41, y0 + 24); ctx.stroke();
+      // Headlight (front, on right)
+      ctx.fillStyle = '#fff5a8';
+      ctx.beginPath(); ctx.arc(x0 + 73, y0 + 14, 2.5, 0, Math.PI * 2); ctx.fill();
+      // Wheels
+      ctx.fillStyle = '#1a1a1a';
+      ctx.beginPath(); ctx.arc(x0 + 16, y0 + 28, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x0 + 60, y0 + 28, 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#888';
+      ctx.beginPath(); ctx.arc(x0 + 16, y0 + 28, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x0 + 60, y0 + 28, 2.5, 0, Math.PI * 2); ctx.fill();
+      // Snow on roof
+      if (t.id === 'snow') {
+        ctx.fillStyle = '#fafafa';
+        ctx.beginPath();
+        ctx.moveTo(x0 + 26, y0 - 2);
+        ctx.lineTo(x0 + 56, y0 - 2);
+        ctx.lineTo(x0 + 56, y0 - 5);
+        ctx.lineTo(x0 + 26, y0 - 5);
+        ctx.closePath(); ctx.fill();
+      }
+      break;
+    }
+    case 'boulder': {
+      const x0 = sx, y0 = gy;
+      ctx.fillStyle = '#8a8278';
+      ctx.beginPath();
+      ctx.ellipse(x0, y0, 28, 22, 0, Math.PI, Math.PI * 2);
+      ctx.fill();
+      // Smaller second hump
+      ctx.fillStyle = '#7a7268';
+      ctx.beginPath();
+      ctx.ellipse(x0 - 14, y0, 14, 12, 0, Math.PI, Math.PI * 2);
+      ctx.fill();
+      // Highlight
+      ctx.fillStyle = '#a8a098';
+      ctx.beginPath();
+      ctx.ellipse(x0 + 8, y0 - 12, 8, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Snow cap
+      if (t.id === 'snow') {
+        ctx.fillStyle = '#fafafa';
+        ctx.beginPath();
+        ctx.ellipse(x0, y0 - 18, 18, 6, 0, Math.PI, Math.PI * 2);
+        ctx.fill();
+      }
+      break;
+    }
+    case 'snowman': {
+      const x0 = sx, y0 = gy;
+      // Bottom snowball
+      ctx.fillStyle = '#fafafa';
+      ctx.beginPath(); ctx.arc(x0, y0 - 14, 14, 0, Math.PI * 2); ctx.fill();
+      // Middle
+      ctx.beginPath(); ctx.arc(x0, y0 - 32, 11, 0, Math.PI * 2); ctx.fill();
+      // Head
+      ctx.beginPath(); ctx.arc(x0, y0 - 46, 8, 0, Math.PI * 2); ctx.fill();
+      // Hat
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(x0 - 8, y0 - 52, 16, 3);
+      ctx.fillRect(x0 - 5, y0 - 60, 10, 8);
+      // Carrot nose
+      ctx.fillStyle = '#ff8833';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0 - 46); ctx.lineTo(x0 + 6, y0 - 46); ctx.lineTo(x0, y0 - 44); ctx.closePath();
+      ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#1a1a1a';
+      ctx.beginPath(); ctx.arc(x0 - 3, y0 - 48, 0.8, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x0 + 3, y0 - 48, 0.8, 0, Math.PI * 2); ctx.fill();
+      // Buttons
+      ctx.beginPath(); ctx.arc(x0, y0 - 30, 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x0, y0 - 26, 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x0, y0 - 22, 1.2, 0, Math.PI * 2); ctx.fill();
+      // Stick arms
+      ctx.strokeStyle = '#5a3818'; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(x0 - 11, y0 - 32); ctx.lineTo(x0 - 22, y0 - 38);
+      ctx.moveTo(x0 + 11, y0 - 32); ctx.lineTo(x0 + 22, y0 - 38);
+      ctx.stroke();
+      // Smile
+      ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 0.8;
+      ctx.beginPath(); ctx.arc(x0, y0 - 44, 2, 0.2, Math.PI - 0.2); ctx.stroke();
+      break;
+    }
+  }
+}
+
+function drawObstacles() {
+  for (const o of obstacles) drawObstacle(o);
+}
+
+// Soft collision: push the helicopter out of the obstacle and reverse its
+// velocity. No damage — this is a kid's game.
+function checkObstacleCollisions() {
+  const r = heliRect();
+  for (const o of obstacles) {
+    const c = obstacleCollider(o);
+    if (rectOverlap(r, c)) {
+      const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+      let dx = heli.x - cx, dy = heli.y - cy;
+      const d = Math.hypot(dx, dy) || 1;
+      // Push heli out of overlap
+      heli.x += (dx / d) * 5;
+      heli.y += (dy / d) * 4;
+      // Bounce velocity (gentle)
+      heli.vx = (dx / d) * 3.5;
+      heli.vy = (dy / d) * 3.0 - 0.5;
+      // Tiny visual puff
+      for (let i = 0; i < 4; i++) {
+        spawnParticle({
+          x: heli.x, y: heli.y,
+          vx: (Math.random() - 0.5) * 2,
+          vy: (Math.random() - 0.5) * 2,
+          gravity: 0.05, life: 1, decay: 0.05,
+          size: 2, color: 'rgba(255,255,255,0.6)', shape: 'circle',
+        });
+      }
+      break; // one collision per frame
+    }
+  }
+}
+
+// Make the cage rest on top of an obstacle when it lands on one
+function settleCageOnObstacles() {
+  for (const o of obstacles) {
+    const c = obstacleCollider(o);
+    if (cage.x > c.x - 4 && cage.x < c.x + c.w + 4) {
+      const top = c.y - CAGE_H;
+      if (cage.y > top) cage.y = top;
+    }
+  }
+}
+
+// =============================================================================
+// WEATHER PARTICLES (rain / snow / leaves) + lightning
+// =============================================================================
+function spawnWeatherParticle() {
+  const t = currentTheme;
+  if (!t.weather) return;
+  const x = camera.x + Math.random() * W;
+  if (t.weather === 'rain') {
+    weatherParticles.push({
+      type: 'rain', x, y: -10,
+      vx: -1.4, vy: 14 + Math.random() * 4,
+      life: 1,
+    });
+  } else if (t.weather === 'snow') {
+    weatherParticles.push({
+      type: 'snow', x, y: -10,
+      vx: (Math.random() - 0.5) * 0.6, vy: 0.8 + Math.random() * 0.8,
+      phase: Math.random() * Math.PI * 2,
+      r: 1.5 + Math.random() * 1.5,
+      life: 1,
+    });
+  } else if (t.weather === 'leaves') {
+    weatherParticles.push({
+      type: 'leaf', x, y: -10,
+      vx: -0.5 - Math.random(), vy: 0.6 + Math.random(),
+      phase: Math.random() * Math.PI * 2,
+      color: ['#d8642a', '#f0a830', '#aa3838', '#dca068'][Math.floor(Math.random() * 4)],
+      life: 1,
+    });
+  }
+}
+function updateWeather() {
+  const t = currentTheme;
+  if (t.weather) {
+    const rate = t.weather === 'rain' ? 6 : (t.weather === 'snow' ? 3 : 1);
+    for (let i = 0; i < rate; i++) spawnWeatherParticle();
+  }
+  for (const p of weatherParticles) {
+    if (p.type === 'rain') {
+      p.x += p.vx; p.y += p.vy;
+      if (p.y > H + 20) p.life = 0;
+    } else if (p.type === 'snow') {
+      p.phase += 0.04;
+      p.x += p.vx + Math.sin(p.phase) * 0.6;
+      p.y += p.vy;
+      if (p.y > H + 20) p.life = 0;
+    } else if (p.type === 'leaf') {
+      p.phase += 0.08;
+      p.x += p.vx + Math.sin(p.phase) * 1.2;
+      p.y += p.vy;
+      if (p.y > H + 20) p.life = 0;
+    }
+  }
+  weatherParticles = weatherParticles.filter(p => p.life > 0);
+
+  // Lightning on storm theme
+  if (t.id === 'storm') {
+    if (lightningFlash > 0) lightningFlash--;
+    if (Math.random() < 0.0025) {
+      lightningFlash = 8;
+      // Quiet rumble — re-use playRumble-ish
+      const at = audioCtx.currentTime;
+      const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.6, audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+      const src = audioCtx.createBufferSource(); src.buffer = buf;
+      const g = audioCtx.createGain(); g.gain.setValueAtTime(0.07, at); g.gain.exponentialRampToValueAtTime(0.0001, at + 0.6);
+      const f = audioCtx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 250;
+      src.connect(f); f.connect(g); g.connect(audioCtx.destination); src.start(at);
+    }
+  }
+}
+function drawWeather() {
+  for (const p of weatherParticles) {
+    const sx = p.x - camera.x;
+    if (sx < -20 || sx > W + 20) continue;
+    if (p.type === 'rain') {
+      ctx.strokeStyle = 'rgba(180,210,240,0.7)'; ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(sx, p.y);
+      ctx.lineTo(sx + p.vx, p.y - p.vy);
+      ctx.stroke();
+    } else if (p.type === 'snow') {
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.beginPath(); ctx.arc(sx, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    } else if (p.type === 'leaf') {
+      ctx.save();
+      ctx.translate(sx, p.y);
+      ctx.rotate(p.phase);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 4, 2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+// =============================================================================
+// DINOSAUR — slow T-Rex that eats injured babies and smashes the clinic
+// =============================================================================
+function makeDino(fromLeft) {
+  return {
+    x: fromLeft ? -150 : WORLD_W + 150,
+    y: groundY(),
+    dir: fromLeft ? 1 : -1,
+    speed: 0.42,
+    state: 'walking',  // walking | eating | smashing | done
+    walkPhase: 0,
+    eatingTimer: 0,
+    eatingBaby: null,
+    smashTimer: 0,
+    spawnDelay: 90,    // grace period before any movement
+    stepTimer: 0,
+    fromLeft,
+  };
+}
+
+function dinoBody() {
+  // Approximate body box (in WORLD coords) — used for drawing-bounds & UI arrows
+  return { x: dino.x - 50, y: dino.y - 90, w: 100, h: 90 };
+}
+
+function updateDino() {
+  if (!dino || gameState !== 'playing') return;
+  if (dino.spawnDelay > 0) { dino.spawnDelay--; return; }
+
+  // Helper: are there any babies left for the dino to threaten?
+  const anyInjured = babies.some(b => b.state === 'injured' || b.state === 'being_eaten');
+
+  if (dino.state === 'walking') {
+    // Retreat if there's nothing left to threaten — player saved them all
+    if (!anyInjured && rescuedCount + eatenCount === SPECIES.length) {
+      const retreatX = dino.fromLeft ? -200 : WORLD_W + 200;
+      const dx = retreatX - dino.x;
+      if (Math.abs(dx) < 10) { dino.state = 'done'; return; }
+      dino.dir = Math.sign(dx);
+      dino.x += dino.dir * 4.0;            // brisk retreat — danger is over
+      dino.walkPhase += 0.32;
+      dino.stepTimer++;
+      if (dino.stepTimer > 14) {
+        dino.stepTimer = 0;
+        const onScreen = dino.x > camera.x - 100 && dino.x < camera.x + W + 100;
+        if (onScreen) playFootstep();
+      }
+      return;
+    }
+
+    // Find nearest INJURED baby in our walking direction
+    let targetBaby = null, nearestDist = Infinity;
+    for (const b of babies) {
+      if (b.state !== 'injured') continue;
+      const dx = b.x - dino.x;
+      if (Math.sign(dx) !== dino.dir && Math.abs(dx) > 30) continue;
+      const dist = Math.abs(dx);
+      if (dist < nearestDist) { nearestDist = dist; targetBaby = b; }
+    }
+
+    let targetX;
+    if (targetBaby) {
+      targetX = targetBaby.x;
+    } else {
+      // No injured babies in path → head to the clinic (stop at the side it
+      // came in from so the dino lands beside the building, not on top of it)
+      const vr = vetRect();
+      targetX = dino.fromLeft ? (vr.x - 30) : (vr.x + vr.w + 30);
+    }
+
+    const dx = targetX - dino.x;
+
+    if (targetBaby && Math.abs(dx) < 26) {
+      dino.state = 'eating';
+      dino.eatingTimer = 90;
+      dino.eatingBaby = targetBaby;
+      targetBaby.state = 'being_eaten';
+      playRoar();
+    } else if (!targetBaby && Math.abs(dx) < 12) {
+      dino.state = 'smashing';
+      dino.smashTimer = 240;          // 4 seconds — enough warning to rush
+      playRoar();
+    } else {
+      dino.dir = Math.sign(dx) || dino.dir;
+      dino.x += dino.dir * dino.speed;
+      dino.walkPhase += 0.1;
+      dino.stepTimer++;
+      if (dino.stepTimer > 50) {
+        dino.stepTimer = 0;
+        const onScreen = dino.x > camera.x - 100 && dino.x < camera.x + W + 100;
+        if (onScreen) { playFootstep(); screenShake = Math.max(screenShake, 3); }
+      }
+    }
+  } else if (dino.state === 'eating') {
+    dino.eatingTimer--;
+    // Crunch sound near end of chomp
+    if (dino.eatingTimer === 60 || dino.eatingTimer === 30) playCrunch();
+    // Tooth/munch particles
+    if (Math.random() < 0.3) {
+      spawnParticle({
+        x: dino.x + dino.dir * 30, y: dino.y - 60,
+        vx: (Math.random() - 0.5) * 2,
+        vy: -1 - Math.random(),
+        gravity: 0.05, life: 1, decay: 0.04,
+        size: 2 + Math.random() * 2,
+        color: ['#fff', '#ff8aaa', '#ffd44a'][Math.floor(Math.random()*3)],
+        shape: 'circle',
+      });
+    }
+    if (dino.eatingTimer <= 0) {
+      const b = dino.eatingBaby;
+      if (b) {
+        babies = babies.filter(x => x.id !== b.id);
+        eatenCount++;
+        floats.push(new FloatText(dino.x, dino.y - 96, '😢 ' + b.species.babyName, '#ff5566'));
+        for (let i = 0; i < 8; i++) {
+          spawnParticle({
+            x: dino.x + 30 * dino.dir, y: dino.y - 60,
+            vx: (Math.random() - 0.5) * 2 + dino.dir * 0.5,
+            vy: -1 - Math.random(),
+            gravity: -0.02, life: 1, decay: 0.025,
+            size: 3, color: 'rgba(180,180,180,0.5)', shape: 'circle',
+          });
+        }
+      }
+      dino.eatingBaby = null;
+      dino.state = 'walking';
+    }
+  } else if (dino.state === 'smashing') {
+    // Player rescues last baby mid-smash → dino bails (clinic stays partially damaged)
+    if (!anyInjured && rescuedCount + eatenCount === SPECIES.length) {
+      dino.state = 'walking';
+      return;
+    }
+    dino.smashTimer--;
+    clinicHealth = Math.max(0, dino.smashTimer / 240);
+    screenShake = 8;
+    // Rubble + dust
+    if (Math.random() < 0.5) {
+      spawnParticle({
+        x: vetCenterX() + (Math.random() - 0.5) * 100,
+        y: groundY() - 80 - Math.random() * 30,
+        vx: (Math.random() - 0.5) * 5,
+        vy: -2 - Math.random() * 4,
+        gravity: 0.18, life: 1, decay: 0.018,
+        size: 3 + Math.random() * 3,
+        color: ['#aaa', '#888', '#c8a868'][Math.floor(Math.random()*3)],
+        shape: 'circle',
+      });
+    }
+    // Crunch sounds during smashing
+    if (dino.smashTimer % 30 === 0) playCrunch();
+    if (dino.smashTimer <= 0) {
+      clinicHealth = 0;
+      gameState = 'gameover';
+      stateTimer = 0;
+      dino.state = 'done';
+      playSadSound();
+    }
+  }
+}
+
+function drawDinosaur(d) {
+  const sx = d.x - camera.x;
+  if (sx < -180 || sx > W + 180) return;
+  const sy = d.y;
+  const dir = d.dir > 0 ? 1 : -1;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.scale(dir, 1);
+
+  const walking = (d.state === 'walking' && d.spawnDelay === 0);
+  const bob = walking ? Math.abs(Math.sin(d.walkPhase)) * 2 : 0;
+  const legSwing = walking ? Math.sin(d.walkPhase) * 7 : 0;
+  // Smashing — body lurches forward
+  const smashLunge = (d.state === 'smashing') ? Math.sin(d.smashTimer * 0.2) * 6 : 0;
+
+  // === TAIL (behind body) ===
+  ctx.fillStyle = '#3a6840';
+  ctx.beginPath();
+  ctx.moveTo(-20, -42);
+  ctx.bezierCurveTo(-50, -55, -78, -45, -90, -18);
+  ctx.lineTo(-84, -12);
+  ctx.bezierCurveTo(-60, -28, -40, -32, -20, -32);
+  ctx.closePath();
+  ctx.fill();
+  // Tail spikes
+  ctx.fillStyle = '#2a5028';
+  for (let i = 0; i < 5; i++) {
+    const t = 0.15 + i * 0.18;
+    const px = -20 + (-90 - (-20)) * t;
+    const py = -42 + Math.pow(t, 0.6) * 22 - 8;
+    ctx.beginPath();
+    ctx.moveTo(px - 3, py + 3);
+    ctx.lineTo(px - 1, py - 5);
+    ctx.lineTo(px + 3, py + 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // === BACK LEG ===
+  ctx.fillStyle = '#3a6840';
+  // thigh
+  ctx.beginPath();
+  ctx.ellipse(-12 - legSwing * 0.3, -28, 12, 16, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // shin
+  ctx.beginPath();
+  ctx.ellipse(-14 - legSwing, -14, 7, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // foot
+  ctx.fillStyle = '#2a5028';
+  ctx.fillRect(-22 - legSwing, -5, 18, 5);
+  // claws
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < 3; i++) {
+    const cx = -22 - legSwing + i * 6;
+    ctx.beginPath();
+    ctx.moveTo(cx, -5); ctx.lineTo(cx + 2, 0); ctx.lineTo(cx + 4, -5);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // === BODY ===
+  ctx.fillStyle = '#4a7848';
+  ctx.beginPath();
+  ctx.ellipse(0 + smashLunge, -50 + bob, 36, 22, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Belly
+  ctx.fillStyle = '#a8c068';
+  ctx.beginPath();
+  ctx.ellipse(0 + smashLunge, -42 + bob, 26, 12, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Back stripes / scales
+  ctx.fillStyle = '#2a5028';
+  for (let i = 0; i < 5; i++) {
+    ctx.beginPath();
+    ctx.ellipse(-20 + i * 10 + smashLunge, -68 + bob, 4, 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // === FRONT LEG ===
+  ctx.fillStyle = '#4a7848';
+  ctx.beginPath();
+  ctx.ellipse(15 + legSwing * 0.3, -28, 12, 16, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(13 + legSwing, -14, 7, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#2a5028';
+  ctx.fillRect(7 + legSwing, -5, 18, 5);
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < 3; i++) {
+    const cx = 7 + legSwing + i * 6;
+    ctx.beginPath();
+    ctx.moveTo(cx, -5); ctx.lineTo(cx + 2, 0); ctx.lineTo(cx + 4, -5);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // === TINY ARM ===
+  ctx.fillStyle = '#3a6840';
+  ctx.fillRect(13 + smashLunge, -50 + bob, 4, 9);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(15 + smashLunge, -41 + bob, 2, 0, Math.PI * 2); ctx.fill();
+
+  // === HEAD ===
+  const jawDrop = (d.state === 'eating') ? Math.abs(Math.sin(d.eatingTimer * 0.4)) * 7 : 0;
+  const headX = 40 + smashLunge;
+  const headY = -65 + bob;
+  ctx.fillStyle = '#4a7848';
+  ctx.beginPath();
+  ctx.ellipse(headX, headY, 26, 18, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Snout (lighter)
+  ctx.fillStyle = '#5a8a58';
+  ctx.beginPath();
+  ctx.ellipse(headX + 16, headY + 4, 14, 9, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth interior (open)
+  ctx.fillStyle = '#3a0808';
+  ctx.beginPath();
+  ctx.moveTo(headX - 6, headY + 7);
+  ctx.lineTo(headX + 28, headY + 7);
+  ctx.lineTo(headX + 28, headY + 11 + jawDrop);
+  ctx.lineTo(headX - 6, headY + 9 + jawDrop * 0.4);
+  ctx.closePath(); ctx.fill();
+  // Tongue
+  if (jawDrop > 1) {
+    ctx.fillStyle = '#d83a5a';
+    ctx.beginPath();
+    ctx.ellipse(headX + 8, headY + 9 + jawDrop * 0.6, 8, 2, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Lower jaw
+  ctx.fillStyle = '#3a6840';
+  ctx.beginPath();
+  ctx.ellipse(headX + 8, headY + 11 + jawDrop, 18, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Top teeth
+  ctx.fillStyle = '#fff5e0';
+  for (let i = 0; i < 6; i++) {
+    const tx = headX - 5 + i * 5.5;
+    ctx.beginPath();
+    ctx.moveTo(tx - 1.5, headY + 7);
+    ctx.lineTo(tx, headY + 11);
+    ctx.lineTo(tx + 1.5, headY + 7);
+    ctx.closePath(); ctx.fill();
+  }
+  // Bottom teeth
+  for (let i = 0; i < 5; i++) {
+    const tx = headX - 4 + i * 5.5;
+    ctx.beginPath();
+    ctx.moveTo(tx - 1.5, headY + 11 + jawDrop);
+    ctx.lineTo(tx, headY + 7 + jawDrop);
+    ctx.lineTo(tx + 1.5, headY + 11 + jawDrop);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Eye (yellow with red pupil — angry)
+  ctx.fillStyle = '#ffeb3b';
+  ctx.beginPath(); ctx.arc(headX + 1, headY - 6, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#a83030';
+  ctx.beginPath(); ctx.arc(headX + 3, headY - 6, 2.6, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(headX + 3, headY - 6, 1, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(headX + 4, headY - 7, 0.6, 0, Math.PI * 2); ctx.fill();
+
+  // Angry brow
+  ctx.strokeStyle = '#3a3000'; ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(headX - 6, headY - 14);
+  ctx.lineTo(headX + 8, headY - 9);
+  ctx.stroke();
+
+  // Nostrils
+  ctx.fillStyle = '#1a1a1a';
+  ctx.beginPath(); ctx.arc(headX + 26, headY + 1, 1.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(headX + 26, headY + 5, 1.0, 0, Math.PI * 2); ctx.fill();
+
+  // === BABY BEING EATEN (visible in jaws briefly) ===
+  if (d.state === 'eating' && d.eatingBaby) {
+    const phase = (90 - d.eatingTimer) / 90; // 0..1
+    if (phase < 0.6) {
+      const liftY = headY + 10 - phase * 12;
+      const wobble = Math.sin(d.eatingTimer * 0.5) * 1.5;
+      ctx.save();
+      ctx.translate(headX + 8, liftY + wobble);
+      ctx.scale(0.55 * (1 - phase * 0.4), 0.55 * (1 - phase * 0.4));
+      drawAnimalAt(d.eatingBaby.species.id, false, 0, 0, { dir: dino.dir > 0 ? -1 : 1 });
+      ctx.restore();
+    }
+  }
+
+  ctx.restore();
+
+  // Off-baseline shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 2, 50, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// =============================================================================
+// HELICOPTER
+// =============================================================================
+function drawHelicopter() {
+  const hx = heli.x - camera.x;
+  const hy = heli.y + Math.sin(heli.bobPhase) * 1.5;
+
+  ctx.save();
+  ctx.translate(hx, hy);
+  ctx.scale(heli.dir, 1);
+
+  // Tail boom
+  ctx.fillStyle = '#5a8a6a';
+  ctx.beginPath();
+  ctx.moveTo(-10, -2); ctx.lineTo(-44, -4); ctx.lineTo(-44, 2); ctx.lineTo(-10, 4);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#3a6a4a';
+  ctx.beginPath();
+  ctx.moveTo(-44, -4); ctx.lineTo(-50, -14); ctx.lineTo(-40, -4);
+  ctx.closePath(); ctx.fill();
+  // Tail rotor
+  heli.tailRotorPhase += 0.9;
+  ctx.save();
+  ctx.translate(-46, 0);
+  ctx.rotate(heli.tailRotorPhase);
+  ctx.fillStyle = 'rgba(40,40,40,0.85)';
+  ctx.fillRect(-10, -1, 20, 2); ctx.fillRect(-1, -10, 2, 20);
+  ctx.restore();
+
+  // Body — green rescue color (matches vet roof)
+  ctx.fillStyle = '#7ec0a4';
+  ctx.beginPath();
+  ctx.moveTo(-12, -10); ctx.lineTo(20, -10);
+  ctx.quadraticCurveTo(34, -8, 32, 4);
+  ctx.lineTo(32, 6); ctx.lineTo(-12, 10);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#bfe2ff';
+  ctx.beginPath();
+  ctx.moveTo(14, -8); ctx.lineTo(28, -6);
+  ctx.quadraticCurveTo(32, -2, 30, 4);
+  ctx.lineTo(14, 4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#fafafa'; ctx.fillRect(-12, -2, 28, 3);
+  // Paw print logo
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(2, -7, 8, 8);
+  ctx.fillStyle = '#5a8a6a';
+  ctx.beginPath(); ctx.ellipse(6, -2, 1.6, 1.2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(4, -4, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(5.5, -5, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(6.5, -5, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(8, -4, 0.8, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1;
+  ctx.strokeRect(-10, -8, 12, 16);
+  // Skids
+  ctx.strokeStyle = '#444'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(-10, 12); ctx.lineTo(20, 12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-6, 10); ctx.lineTo(-8, 12); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(16, 10); ctx.lineTo(18, 12); ctx.stroke();
+  // Winch
+  ctx.fillStyle = '#888'; ctx.fillRect(0, 8, 6, 4);
+  // Main rotor
+  heli.rotorPhase += 1.1;
+  ctx.save();
+  ctx.translate(8, -12);
+  ctx.fillStyle = '#444'; ctx.fillRect(-1, 0, 2, 4);
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = '#222';
+  ctx.beginPath(); ctx.ellipse(0, -1, 36, 2, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.save();
+  ctx.rotate(heli.rotorPhase);
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(-36, -1, 72, 2);
+  ctx.restore();
+  ctx.restore();
+
+  ctx.restore();
+
+  // Down-wash
+  if (heli.y > groundY() - 220 && Math.random() < 0.4) {
+    spawnParticle({
+      x: heli.x + (Math.random() - 0.5) * 50,
+      y: heli.y + 12,
+      vx: (Math.random() - 0.5) * 3, vy: 1 + Math.random() * 2,
+      gravity: 0.05, life: 1, decay: 0.04,
+      size: 2 + Math.random() * 2,
+      color: 'rgba(220,220,220,0.4)', shape: 'circle',
+    });
+  }
+}
+
+function heliRect() {
+  return { x: heli.x - HELI_W / 2, y: heli.y - HELI_H / 2, w: HELI_W, h: HELI_H };
+}
+
+function updateHelicopter() {
+  const cageDown = cage.cableLength > 4;
+  let ax = 0, ay = 0;
+  if (!cageDown) {
+    if (isLeft())  ax -= 1;
+    if (isRight()) ax += 1;
+    if (isUp())    ay -= 1;
+    if (isDown())  ay += 1;
+    if (ax !== 0 && ay !== 0) { ax *= 0.707; ay *= 0.707; }
+  }
+
+  if (cageDown) {
+    heli.vx *= 0.7;
+    heli.vy *= 0.7;
+    if (Math.abs(heli.vx) < 0.05) heli.vx = 0;
+    if (Math.abs(heli.vy) < 0.05) heli.vy = 0;
+  } else {
+    heli.vx += (ax * HELI_SPEED - heli.vx) * 0.12;
+    heli.vy += (ay * HELI_SPEED - heli.vy) * 0.15;
+    if (Math.abs(heli.vx) < 0.05) heli.vx = 0;
+    if (Math.abs(heli.vy) < 0.05) heli.vy = 0;
+  }
+
+  heli.x += heli.vx;
+  heli.y += heli.vy;
+
+  if (heli.vx > 0.5) heli.dir = 1;
+  else if (heli.vx < -0.5) heli.dir = -1;
+
+  const minY = 30;
+  const maxY = groundY() - 30;
+  heli.x = Math.max(20, Math.min(WORLD_W - 20, heli.x));
+  heli.y = Math.max(minY, Math.min(maxY, heli.y));
+
+  heli.bobPhase += 0.15;
+  const intensity = 0.04 + Math.min(0.05, (Math.abs(heli.vx) + Math.abs(heli.vy)) * 0.01);
+  setRotorVolume(intensity);
+
+  checkObstacleCollisions();
+
+  // Hard clamp again after collision push so heli doesn't escape the world
+  heli.x = Math.max(20, Math.min(WORLD_W - 20, heli.x));
+  heli.y = Math.max(minY, Math.min(maxY, heli.y));
+}
+
+// =============================================================================
+// CAGE
+// =============================================================================
+function drawCageAndCable() {
+  const ax = heli.x;
+  const ay = heli.y + 12;
+  const cx = cage.x;
+  const cy = cage.y;
+  ctx.save();
+  ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(ax - camera.x, ay);
+  ctx.lineTo(cx - camera.x, cy);
+  ctx.stroke();
+  ctx.restore();
+
+  if (cage.cableLength < 4) return;
+
+  ctx.save();
+  ctx.translate(cx - camera.x, cy);
+  // Hook
+  ctx.fillStyle = '#888'; ctx.fillRect(-3, -4, 6, 4);
+  // Soft basket: warmer color, padded look
+  ctx.fillStyle = '#f0c870';
+  ctx.fillRect(-CAGE_W / 2, 0, CAGE_W, CAGE_H);
+  ctx.fillStyle = '#b88a18';
+  ctx.fillRect(-CAGE_W / 2, 0, CAGE_W, 3);
+  ctx.fillRect(-CAGE_W / 2, CAGE_H - 3, CAGE_W, 3);
+  // Soft pillow inside
+  ctx.fillStyle = '#ffe8c0';
+  ctx.fillRect(-CAGE_W / 2 + 4, 4, CAGE_W - 8, CAGE_H - 8);
+  // Bars (lighter — friendly)
+  ctx.strokeStyle = '#d8a838'; ctx.lineWidth = 1.5;
+  for (let i = 0; i < 5; i++) {
+    const xx = -CAGE_W / 2 + 4 + i * (CAGE_W - 8) / 4;
+    ctx.beginPath();
+    ctx.moveTo(xx, 3); ctx.lineTo(xx, CAGE_H - 3);
+    ctx.stroke();
+  }
+
+  // Passenger inside
+  if (cage.passenger) {
+    const p = cage.passenger;
+    ctx.save();
+    ctx.translate(0, CAGE_H - 8);
+    ctx.scale(0.7, 0.7);
+    drawAnimalAt(p.species.id, false, 0, 0, { dir: 1 });
+    ctx.restore();
+  }
+
+  // Open indicator
+  const onSomething = cageRestingOnSurface();
+  if (onSomething && !cage.passenger) {
+    ctx.font = "bold 18px 'Comic Sans MS', cursive";
+    const pulse = 0.7 + 0.3 * Math.sin(Date.now() * 0.01);
+    ctx.fillStyle = `rgba(255,240,140,${pulse})`;
+    ctx.shadowColor = '#ffaa33'; ctx.shadowBlur = 8;
+    ctx.textAlign = 'center';
+    ctx.fillText('↓', 0, -8);
+  }
+  ctx.restore();
+}
+
+function cageRestingOnSurface() {
+  return cage.cableLength > 4 && cage.y + CAGE_H >= groundY() - 1;
+}
+
+function cageInVet() {
+  return cage.x > VET.x && cage.x < VET.x + VET.w;
+}
+
+function updateCage() {
+  if (isCage()) {
+    cage.cableLength = Math.min(CABLE_MAX, cage.cableLength + CABLE_SPEED);
+    if (Math.random() < 0.15) playWinch();
+  } else {
+    cage.cableLength = Math.max(0, cage.cableLength - CABLE_SPEED * 1.4);
+  }
+
+  const targetAngle = Math.atan(-heli.vx / 22);
+  cage.angVel += (targetAngle - cage.angle) * 0.05;
+  cage.angVel *= 0.92;
+  cage.angle += cage.angVel;
+  cage.angle = Math.max(-0.6, Math.min(0.6, cage.angle));
+
+  const ax = heli.x, ay = heli.y + 12;
+  cage.x = ax + Math.sin(cage.angle) * cage.cableLength;
+  cage.y = ay + Math.cos(cage.angle) * cage.cableLength;
+
+  // Cage rests on ground
+  const groundTopY = groundY() - CAGE_H;
+  if (cage.y > groundTopY) {
+    cage.y = groundTopY;
+    cage.x = ax + Math.sin(cage.angle) * Math.max(0, cage.y - ay);
+  }
+
+  // Cage rests on top of obstacles (boulders, fences, cars, etc.)
+  settleCageOnObstacles();
+
+  // Auto-deliver in vet zone
+  if (cage.passenger && cageRestingOnSurface() && cageInVet()) {
+    const b = cage.passenger;
+    cage.passenger = null;
+    b.state = 'healing';
+    b.healTimer = 120;             // 2-second healing animation in front of door
+    b.healedSlot = rescuedCount;
+    b.x = doorX();
+    b.y = groundY() - babyHeight(b.species.id);
+    b.dir = 1;
+    rescuedCount++;
+    floats.push(new FloatText(b.x, b.y - 30, '+ ' + b.species.babyName + '!', '#7eff9e'));
+    playHeal();
+    // Sparkle burst on arrival
+    for (let i = 0; i < 12; i++) {
+      spawnParticle({
+        x: b.x + (Math.random() - 0.5) * 10,
+        y: b.y - 6 + (Math.random() - 0.5) * 12,
+        vx: (Math.random() - 0.5) * 2,
+        vy: -1 - Math.random() * 1.5,
+        gravity: -0.02, life: 1, decay: 0.03,
+        size: 3, color: ['#ff99dd', '#ffd44a', '#aaffaa'][i % 3], shape: 'star',
+      });
+    }
+  }
+}
+
+// =============================================================================
+// BABY UPDATES (boarding cage, healing, reuniting, leaving)
+// =============================================================================
+function updateBabies() {
+  for (const b of babies) {
+    b.bobPhase += 0.08;
+    if (b.state === 'injured') {
+      b.sparklePhase += 0.05;
+      // Walk toward cage if it's close and on ground
+      if (!cage.passenger && cageRestingOnSurface() && !cageInVet()) {
+        const dx = cage.x - b.x;
+        if (Math.abs(dx) < PICKUP_RADIUS) {
+          b.state = 'boarding';
+          b.targetX = cage.x;
+          b.dir = dx > 0 ? 1 : -1;
+        }
+      }
+    } else if (b.state === 'boarding') {
+      // If cage left, revert
+      if (!cageRestingOnSurface() || cage.passenger || cageInVet()) {
+        b.state = 'injured';
+        continue;
+      }
+      b.targetX = cage.x;
+      const dx = b.targetX - b.x;
+      if (Math.abs(dx) > 1) {
+        b.x += Math.sign(dx) * Math.min(Math.abs(dx), ANIMAL_WALK_SPEED);
+        b.dir = dx > 0 ? 1 : -1;
+        b.walkPhase += 0.3;
+      } else if (!cage.passenger) {
+        b.state = 'in_cage';
+        cage.passenger = b;
+        playPickup();
+        floats.push(new FloatText(cage.x, cage.y - 6, 'In!', '#ffd44a'));
+      } else {
+        b.state = 'injured';
+      }
+    } else if (b.state === 'healing') {
+      b.healTimer--;
+      // Sparkle particles around healing animal
+      if (Math.random() < 0.4) {
+        spawnParticle({
+          x: b.x + (Math.random() - 0.5) * 20,
+          y: b.y - babyHeight(b.species.id) / 2 + (Math.random() - 0.5) * 16,
+          vx: (Math.random() - 0.5) * 0.8,
+          vy: -0.5 - Math.random(),
+          gravity: -0.01, life: 1, decay: 0.03,
+          size: 2.5, color: '#ffe888', shape: 'star',
+        });
+      }
+      if (b.healTimer <= 0) {
+        // Baby is healed → goes inside the clinic to its window slot
+        b.state = 'in_window';
+        playSparkle();
+        // Sparkle at door (where they were standing) and at window (where they appear)
+        const w = windowCenter(b.healedSlot);
+        for (let i = 0; i < 8; i++) {
+          spawnParticle({
+            x: b.x, y: b.y - 10,
+            vx: (Math.random() - 0.5) * 3,
+            vy: (Math.random() - 0.5) * 3 - 1,
+            gravity: -0.02, life: 1, decay: 0.025,
+            size: 3, color: '#aaffaa', shape: 'star',
+          });
+          spawnParticle({
+            x: w.x, y: w.y,
+            vx: (Math.random() - 0.5) * 2,
+            vy: (Math.random() - 0.5) * 2,
+            gravity: 0, life: 1, decay: 0.03,
+            size: 2.5, color: '#ffe888', shape: 'star',
+          });
+        }
+        // Move baby to its window slot (drawing at window is handled in drawVet)
+        b.x = w.x;
+        b.y = w.y;
+      }
+    } else if (b.state === 'leaving') {
+      // Walk with mommy
+      if (b.mommy) {
+        b.x = b.mommy.x + b.mommy.dir * 14;
+        b.dir = b.mommy.dir;
+        b.walkPhase += 0.3;
+      }
+    }
+  }
+}
+
+// =============================================================================
+// MOMMY UPDATES
+// =============================================================================
+// Spawn the next mommy in line — only one is active at the door at a time.
+// The first eligible baby in 'in_window' state is the one collected.
+function spawnNextMommy() {
+  const next = babies.find(b => b.state === 'in_window');
+  if (!next) return false;
+  const fromLeft = (next.healedSlot % 2 === 0);
+  const mom = makeMommy(next.species.id, fromLeft, next);
+  mom.state = 'walking_to_door';
+  mommies.push(mom);
+  next.mommy = mom;
+  return true;
+}
+
+function updateMommies() {
+  for (const m of mommies) {
+    m.bobPhase += 0.08;
+    if (m.state === 'walking_to_door') {
+      // Walk to a position just beside the door (on the side the mom came from)
+      const stopX = doorX() + (m.fromLeft ? -28 : 28);
+      const dx = stopX - m.x;
+      m.dir = Math.sign(dx) || (m.fromLeft ? 1 : -1);
+      const speed = 3.0;
+      if (Math.abs(dx) > 4) {
+        m.x += m.dir * speed;
+        m.walkPhase += 0.28;
+      } else {
+        // Arrived at door — wait briefly while baby comes out
+        m.state = 'waiting_for_baby';
+        m.waitTimer = 30;
+        // Face the door (toward the centerline)
+        m.dir = m.fromLeft ? 1 : -1;
+        playSparkle();
+      }
+    } else if (m.state === 'waiting_for_baby') {
+      m.waitTimer--;
+      if (m.waitTimer <= 0) {
+        // Baby steps out of the door
+        const b = m.babyRef;
+        b.state = 'reuniting';
+        b.x = doorX() + (m.fromLeft ? 14 : -14); // baby steps out toward mom
+        b.y = groundY() - babyHeight(b.species.id);
+        b.dir = m.fromLeft ? -1 : 1;             // baby faces mom
+        // Sparkle at the empty window
+        const w = windowCenter(b.healedSlot);
+        for (let i = 0; i < 6; i++) {
+          spawnParticle({
+            x: w.x, y: w.y,
+            vx: (Math.random() - 0.5) * 1.5,
+            vy: -0.5 - Math.random(),
+            gravity: 0, life: 1, decay: 0.04,
+            size: 2, color: '#ffe888', shape: 'star',
+          });
+        }
+        // Burst of hearts at the door
+        for (let i = 0; i < 10; i++) {
+          spawnParticle({
+            x: doorX() + (Math.random() - 0.5) * 24,
+            y: m.y - 20 + (Math.random() - 0.5) * 20,
+            vx: (Math.random() - 0.5) * 1.5,
+            vy: -1 - Math.random() * 1.5,
+            gravity: -0.02, life: 1, decay: 0.018,
+            size: 4, color: '#ff77aa', shape: 'heart',
+          });
+        }
+        m.state = 'nuzzling';
+        m.nuzzleTimer = 60;
+      }
+    } else if (m.state === 'nuzzling') {
+      m.nuzzleTimer--;
+      if (Math.random() < 0.3) {
+        spawnParticle({
+          x: m.x + (Math.random() - 0.5) * 16,
+          y: m.y - 20,
+          vx: (Math.random() - 0.5) * 1,
+          vy: -0.8 - Math.random(),
+          gravity: -0.02, life: 1, decay: 0.02,
+          size: 3, color: '#ff77aa', shape: 'heart',
+        });
+      }
+      if (m.nuzzleTimer <= 0) {
+        m.state = 'leaving';
+        m.dir = m.fromLeft ? -1 : 1;
+        m.babyRef.state = 'leaving';
+        m.babyRef.dir = m.dir;
+        m.leavingFrames = 110;
+        // Queue the next mommy now so she's walking in while this one leaves
+        spawnNextMommy();
+      }
+    } else if (m.state === 'leaving') {
+      const speed = 2.0;
+      m.x += m.dir * speed;
+      m.walkPhase += 0.22;
+      m.leavingFrames--;
+      if (m.leavingFrames <= 0) {
+        // Final sparkle of hearts as the family heads home
+        for (let i = 0; i < 12; i++) {
+          spawnParticle({
+            x: m.x + (Math.random() - 0.5) * 24,
+            y: m.y - 16 + (Math.random() - 0.5) * 16,
+            vx: (Math.random() - 0.5) * 2,
+            vy: -1 - Math.random() * 1.5,
+            gravity: -0.02, life: 1, decay: 0.02,
+            size: 4, color: '#ff77aa', shape: 'heart',
+          });
+        }
+        m.state = 'gone';
+        m.babyRef.state = 'gone';
+      }
+    }
+  }
+}
+
+// =============================================================================
+// DRAWING ANIMALS IN THE WORLD
+// =============================================================================
+function drawBaby(b) {
+  if (b.state === 'in_cage' || b.state === 'gone' || b.state === 'in_window') return;
+  const sx = b.x - camera.x;
+  // 'reuniting' = standing still next to mom — only animate legs while actually walking
+  const animate = (b.state === 'boarding' || b.state === 'leaving');
+  // Healing baby gets a soft glow
+  if (b.state === 'healing') {
+    ctx.save();
+    const pulse = 0.4 + 0.3 * Math.sin(Date.now() * 0.008);
+    ctx.fillStyle = `rgba(170, 230, 170, ${pulse})`;
+    ctx.beginPath();
+    ctx.arc(sx, b.y - babyHeight(b.species.id) / 2, 30, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  // Bandage on injured
+  if (b.state === 'injured') {
+    drawBandage(sx, b.y - babyHeight(b.species.id) / 2 - 8, b);
+  }
+
+  drawAnimalAt(b.species.id, false, sx, b.y, {
+    walkPhase: b.walkPhase,
+    walking: animate,
+    bobPhase: b.bobPhase,
+    dir: b.dir,
+  });
+
+  // Name tag above injured babies
+  if (b.state === 'injured') {
+    const wob = Math.sin(b.sparklePhase * 2) * 1.5;
+    ctx.save();
+    ctx.font = "bold 11px 'Comic Sans MS', cursive";
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#fff';
+    ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 3;
+    ctx.fillText(b.species.babyName, sx, b.y - babyHeight(b.species.id) - 8 + wob);
+    ctx.restore();
+  }
+}
+
+function drawBandage(cx, cy, b) {
+  // Tan plus-sign bandage on top of baby
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(0.4);
+  ctx.fillStyle = '#f0d09a';
+  ctx.fillRect(-5, -2, 10, 4);
+  ctx.fillStyle = '#d8a868';
+  ctx.fillRect(-5, -2, 10, 1);
+  ctx.fillRect(-5, 1, 10, 1);
+  // Dots on bandage
+  ctx.fillStyle = '#a87030';
+  ctx.fillRect(-3, -0.5, 0.6, 1);
+  ctx.fillRect(2, -0.5, 0.6, 1);
+  ctx.restore();
+}
+
+function drawMommy(m) {
+  if (m.state === 'gone' || m.state === 'waiting') return;
+  const sx = m.x - camera.x;
+  const animate = (m.state === 'walking_to_baby' || m.state === 'leaving');
+  drawAnimalAt(m.speciesId, true, sx, m.y, {
+    walkPhase: m.walkPhase,
+    walking: animate,
+    bobPhase: m.bobPhase,
+    dir: m.dir,
+  });
+
+  // Heart bubble while nuzzling
+  if (m.state === 'nuzzling') {
+    const wob = Math.sin(Date.now() * 0.006) * 2;
+    ctx.save();
+    ctx.fillStyle = '#ff77aa';
+    drawHeart(sx, m.y - momHeight(m.speciesId) - 14 + wob, 8);
+    ctx.restore();
+  }
+}
+
+// =============================================================================
+// HUD / BANNER
+// =============================================================================
+function drawHUD() {
+  ctx.save();
+  ctx.font = "bold 26px 'Comic Sans MS', cursive";
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 4;
+  ctx.fillText('🐾 ' + rescuedCount + '/' + babies.length, 14, 36);
+
+  ctx.font = "16px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#fff5a8';
+  if (!reunionTriggered) {
+    ctx.fillText('Take babies to the vet!', 14, 60);
+  } else if (dino && dino.state !== 'done') {
+    ctx.fillText('Wait — the dino is leaving! 🦖', 14, 60);
+  } else {
+    ctx.fillText('The mommies are picking them up! 💕', 14, 60);
+  }
+
+  // Music indicator
+  ctx.font = "16px serif";
+  ctx.textAlign = 'right';
+  ctx.fillStyle = musicState.on ? 'rgba(255,255,255,0.85)' : 'rgba(180,180,180,0.6)';
+  ctx.fillText(musicState.on ? '🎵' : '🔇', W - 14, 36);
+
+  // Hint text early on
+  if (stateTimer < 360 && gameState === 'playing') {
+    const fade = Math.max(0, 1 - stateTimer / 360);
+    ctx.textAlign = 'center';
+    ctx.font = "16px 'Comic Sans MS', cursive";
+    ctx.fillStyle = `rgba(255,255,255,${fade})`;
+    ctx.shadowBlur = 0;
+    ctx.fillText('Arrows to fly • SPACE: lower basket • M: music', W / 2, 36);
+    ctx.fillText("Land basket near a baby — they'll hop in!", W / 2, 60);
+  }
+  ctx.restore();
+
+  // Off-screen indicators for injured babies
+  if (gameState === 'playing' && !reunionTriggered) {
+    for (const b of babies) {
+      if (b.state !== 'injured') continue;
+      const sx = b.x - camera.x;
+      if (sx < 30) drawArrowIndicator(20, H * 0.5, '←', '#ffd44a');
+      else if (sx > W - 30) drawArrowIndicator(W - 20, H * 0.5, '→', '#ffd44a');
+    }
+  }
+
+  // Dino warning
+  if (gameState === 'playing' && dino && dino.state !== 'done' && dino.spawnDelay === 0) {
+    const sx = dino.x - camera.x;
+    if (sx < -40) {
+      drawArrowIndicator(40, H * 0.4, '🦖←', '#ff5566');
+    } else if (sx > W + 40) {
+      drawArrowIndicator(W - 40, H * 0.4, '→🦖', '#ff5566');
+    }
+  }
+}
+function drawArrowIndicator(x, y, ch, color) {
+  ctx.save();
+  ctx.font = "bold 36px 'Comic Sans MS', cursive";
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const pulse = 0.6 + 0.4 * Math.sin(Date.now() * 0.008);
+  ctx.fillStyle = color; ctx.globalAlpha = pulse;
+  ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
+  ctx.fillText(ch, x, y);
+  ctx.restore();
+}
+
+function drawTitleBanner() {
+  if (gameState !== 'playing' || stateTimer > 240) return;
+  const fade = Math.max(0, 1 - stateTimer / 240);
+  ctx.save();
+  ctx.font = "bold 28px 'Comic Sans MS', cursive";
+  ctx.textAlign = 'center';
+  ctx.fillStyle = `rgba(255, 153, 204, ${fade})`;
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 6;
+  ctx.fillText('🐾 Baby Animal Rescue 🐾', W / 2, 100);
+  ctx.font = "bold 18px 'Comic Sans MS', cursive";
+  ctx.fillStyle = `rgba(255, 245, 168, ${fade})`;
+  ctx.fillText(currentTheme.name, W / 2, 128);
+  ctx.restore();
+}
+
+// =============================================================================
+// WIN SCREEN — family portraits
+// =============================================================================
+let winPhase = 0;
+function drawWin() {
+  if (gameState !== 'win') return;
+  winPhase += 0.04;
+  ctx.save();
+  // Soft pink dim
+  ctx.globalAlpha = 0.7;
+  ctx.fillStyle = '#3a1a3a';
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+
+  // Confetti
+  for (let i = 0; i < 50; i++) {
+    const x = ((i * 137 + (Date.now() * 0.05) % 137) % W);
+    const y = ((Date.now() * 0.1 + i * 53) % H);
+    const c = ['#ffd44a', '#ff7799', '#88c0ff', '#9bff77', '#bb88ff'][i % 5];
+    ctx.fillStyle = c;
+    ctx.fillRect(x, y, 4, 6);
+  }
+
+  // Title
+  ctx.textAlign = 'center';
+  ctx.font = "bold 46px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#ffd44a';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 8;
+  const titleBob = Math.sin(winPhase * 2) * 4;
+  ctx.fillText('💕 Everybody Home Safe! 💕', W / 2, 80 + titleBob);
+
+  ctx.font = "22px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#fff';
+  ctx.fillText('You rescued ' + babies.length + ' baby animals!', W / 2, 130);
+
+  // Family portraits (mommy + baby together)
+  const cellW = 160, cellH = 130;
+  const cols = Math.min(4, Math.max(2, Math.ceil(Math.sqrt(babies.length))));
+  const rows = Math.max(1, Math.ceil(babies.length / cols));
+  const gridW = cols * cellW;
+  const gridX = W / 2 - gridW / 2;
+  const gridY = 170;
+  for (let i = 0; i < babies.length; i++) {
+    const r = Math.floor(i / cols), c = i % cols;
+    const cx = gridX + c * cellW + cellW / 2;
+    const cy = gridY + r * cellH + cellH / 2;
+    drawFamilyPortrait(babies[i], cx, cy, i);
+  }
+
+  // Footer
+  ctx.font = "20px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#aaccff';
+  ctx.fillText('Tap or press space to play again 🚁', W / 2, H - 40);
+  ctx.restore();
+}
+
+function drawGameOver() {
+  if (gameState !== 'gameover') return;
+  const a = Math.min(1, stateTimer / 60);
+  ctx.save();
+  ctx.globalAlpha = a * 0.75;
+  ctx.fillStyle = '#1a1020';
+  ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = a;
+  ctx.textAlign = 'center';
+  ctx.font = "bold 42px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#ff8aaa';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 8;
+  ctx.fillText('🦖 The dino smashed the vet!', W / 2, H / 2 - 50);
+  ctx.font = "26px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#fff5a8';
+  ctx.fillText('Rescued: ' + rescuedCount + '   Eaten: ' + eatenCount, W / 2, H / 2);
+  ctx.font = "22px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#fff';
+  ctx.fillText('Tap or press space to try again 🚁', W / 2, H / 2 + 50);
+  ctx.restore();
+}
+
+function drawFamilyPortrait(b, cx, cy, i) {
+  const phase = winPhase * 1.5 + i * 0.6;
+  const jump = Math.max(0, Math.sin(phase * 2) * 6);
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + 36, 50, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mommy on the left, baby on the right
+  ctx.save();
+  ctx.translate(cx - 22, cy - jump);
+  ctx.scale(1.1, 1.1);
+  drawAnimalAt(b.species.id, true, 0, 0, { walkPhase: 0, walking: false, bobPhase: phase, dir: 1 });
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(cx + 26, cy - jump * 0.7 + 8);
+  ctx.scale(1.4, 1.4);
+  drawAnimalAt(b.species.id, false, 0, 0, { walkPhase: 0, walking: false, bobPhase: phase, dir: -1 });
+  ctx.restore();
+
+  // Heart between them
+  ctx.fillStyle = '#ff77aa';
+  ctx.save();
+  ctx.translate(cx + 4, cy - 18 - jump);
+  ctx.scale(1, 1);
+  drawHeart(0, 0, 5);
+  ctx.restore();
+
+  // Name
+  ctx.font = "bold 14px 'Comic Sans MS', cursive";
+  ctx.fillStyle = '#fff5a8';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 4;
+  ctx.fillText(b.species.babyName + ' & ' + b.species.momName, cx, cy + 56);
+}
+
+// =============================================================================
+// LEVEL COMPLETE CHECK
+// =============================================================================
+function checkLevelTransitions() {
+  if (gameState !== 'playing') return;
+
+  const allRescued = (rescuedCount + eatenCount === SPECIES.length);
+  const allInWindow = babies.every(b =>
+    b.state === 'in_window' || b.state === 'reuniting' ||
+    b.state === 'leaving'   || b.state === 'gone');
+  const dinoGone = !dino || dino.state === 'done';
+
+  // Phase 1: trigger reunion (sets the flag so the dino retreats, even if it
+  // hasn't itself noticed yet) once all babies are tucked safely in windows.
+  if (!reunionTriggered && allRescued && allInWindow) {
+    reunionTriggered = true;
+    floats.push(new FloatText(camera.x + W / 2, 100, '🌸 Everybody safe!', '#ff99cc'));
+  }
+
+  // Phase 2: once the dino is off-screen, the mommies start arriving (one at a
+  // time). The first one is queued here; subsequent ones are queued in Phase 3.
+  if (reunionTriggered && dinoGone && mommies.length === 0) {
+    if (babies.some(b => b.state === 'in_window')) {
+      playReunion();
+      floats.push(new FloatText(camera.x + W / 2, 130, '🌸 The mommies are coming! 🌸', '#ff99cc'));
+      spawnNextMommy();
+    } else {
+      // No survivors — sad ending
+      gameState = 'gameover';
+      stateTimer = 0;
+      playSadSound();
+    }
+  }
+
+  // Phase 3: every mommy has left and there are no more babies in windows → win.
+  // (The next mommy is queued when the previous one starts leaving, so we don't
+  // need to spawn here — only to detect the end of the celebration.)
+  if (reunionTriggered && mommies.length > 0) {
+    const allDone = mommies.every(m => m.state === 'gone');
+    const noMore  = !babies.some(b => b.state === 'in_window');
+    if (allDone && noMore) {
+      gameState = 'win';
+      stateTimer = 0;
+      winPhase = 0;
+      playWin();
+    } else if (allDone && !noMore) {
+      // Defensive fallback — shouldn't normally hit this with the leaving-queue
+      spawnNextMommy();
+    }
+  }
+}
+
+// =============================================================================
+// ADVANCE / RESTART
+// =============================================================================
+function tryAdvance() {
+  if (gameState === 'win' && stateTimer > 60) {
+    currentThemeIdx++;
+    startLevel();
+  } else if (gameState === 'gameover' && stateTimer > 60) {
+    // Retry same theme — kid likely wants another go at this scene
+    startLevel();
+  }
+}
+canvas.addEventListener('click', tryAdvance);
+canvas.addEventListener('touchstart', tryAdvance, { passive: true });
+window.addEventListener('keydown', e => {
+  if ((gameState === 'win' || gameState === 'gameover') && stateTimer > 30 &&
+      (e.key === ' ' || e.key === 'Enter')) {
+    tryAdvance();
+  }
+});
+
+// =============================================================================
+// MAIN LOOP
+// =============================================================================
+function update() {
+  stateTimer++;
+  updateClouds();
+  updateMusic();
+  updateWeather();
+  if (gameState !== 'playing') {
+    updateParticles();
+    floats.forEach(f => f.update());
+    floats = floats.filter(f => f.life > 0);
+    return;
+  }
+  levelTimer++;
+
+  updateHelicopter();
+  updateCage();
+  updateBabies();
+  updateDino();
+  updateMommies();
+  checkLevelTransitions();
+  if (screenShake > 0) screenShake--;
+
+  updateParticles();
+  floats.forEach(f => f.update());
+  floats = floats.filter(f => f.life > 0);
+  cameraFollow(false);
+}
+
+function draw() {
+  // Apply screen shake (decays each frame)
+  ctx.save();
+  if (screenShake > 0) {
+    const m = Math.min(screenShake, 8);
+    ctx.translate((Math.random() - 0.5) * m * 1.5, (Math.random() - 0.5) * m);
+  }
+
+  drawBackground();
+  drawObstacles();
+  drawVet();
+
+  // Sort drawables by y so closer ones overlap correctly (slight depth)
+  const drawables = [];
+  for (const b of babies) {
+    if (b.state === 'in_cage' || b.state === 'gone' || b.state === 'being_eaten' || b.state === 'in_window') continue;
+    drawables.push({ y: b.y, draw: () => drawBaby(b) });
+  }
+  for (const m of mommies) {
+    if (m.state === 'gone' || m.state === 'waiting') continue;
+    drawables.push({ y: m.y, draw: () => drawMommy(m) });
+  }
+  drawables.sort((a, b) => a.y - b.y);
+  for (const d of drawables) d.draw();
+
+  // Dinosaur draws on top (it's big and we want it always visible)
+  if (dino && dino.state !== 'done') drawDinosaur(dino);
+
+  drawCageAndCable();
+  drawHelicopter();
+
+  drawParticles();
+  drawWeather();
+  floats.forEach(f => f.draw());
+
+  ctx.restore();
+
+  drawTitleBanner();
+  drawHUD();
+
+  drawWin();
+  drawGameOver();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+startLevel();
+loop();
+</script>
+</body>
+</html>
