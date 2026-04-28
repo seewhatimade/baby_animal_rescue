@@ -2,6 +2,8 @@
 
 Fly a rescue helicopter, scoop up injured baby animals, heal them at the vet clinic, and reunite them with their mommies — all before the dinosaur smashes the clinic!
 
+https://seewhatimade.github.io/baby_animal_rescue/
+
 ## How to Play
 
 1. **Take off** from the helipad at the vet clinic.
